@@ -1,0 +1,21 @@
+const router = require('express').Router();
+const ctrl = require('../controllers/auth.controller');
+const trek = require('../controllers/trek.controlller');
+const booking = require('../controllers/booking.controller');
+const upcoming = require('../controllers/upcoming.controller');
+
+router.post('/login', ctrl.login);
+router.post('/register', ctrl.register);
+router.get('/dashData', trek.getDashboardData);
+router.get('/getTrekById/:id', trek.getTrekById);
+router.post('/booking', booking.createBookingController);
+router.get('/',upcoming.getAllUpcoming);
+router.get('/:id',upcoming.getTrekById);
+router.get('/by-month/:year/:month',upcoming.getTrekBymonth);
+router.get('/meta/categories',upcoming.getTrekByCategory);
+router.get('/stats/monthly/:year',upcoming.getTrekByYear);
+router.get('/meta/available-years',upcoming.getAllyear);
+
+
+
+module.exports = router;
