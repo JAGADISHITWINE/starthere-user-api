@@ -19,7 +19,9 @@
     "jsonwebtoken": "^9.0.3",
     "mysql2": "^3.16.1",
     "nodemailer": "^7.0.13",
-    "sequelize": "^6.37.7"
+    "pdfkit": "^0.17.2",
+    "sequelize": "^6.37.7",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/crypto-js": "^4.2.2",

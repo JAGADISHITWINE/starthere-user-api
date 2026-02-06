@@ -9,12 +9,16 @@ router.post('/register', ctrl.register);
 router.get('/dashData', trek.getDashboardData);
 router.get('/getTrekById/:id', trek.getTrekById);
 router.post('/booking', booking.createBookingController);
+router.get('/getMyBookingsById/:id',booking.getMyBookingsById);
+router.get('/bookings/:userId/:bookingId/receipt', booking.getReceiptById);
+router.post('/bookings/:bookingId/cancel', booking.cancleBooking);
 router.get('/',upcoming.getAllUpcoming);
 router.get('/:id',upcoming.getTrekById);
 router.get('/by-month/:year/:month',upcoming.getTrekBymonth);
 router.get('/meta/categories',upcoming.getTrekByCategory);
 router.get('/stats/monthly/:year',upcoming.getTrekByYear);
 router.get('/meta/available-years',upcoming.getAllyear);
+
 
 
 

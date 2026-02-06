@@ -85,10 +85,12 @@ async function createBooking(bookingData) {
         payment_status,
         amount_paid,
         balance_due,
+        refund_amount,
+        cancellation_fee,
         payment_deadline,
         booking_status,
         confirmation_sent
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const paymentDeadline = new Date(bookingData.startDate);
@@ -130,6 +132,8 @@ async function createBooking(bookingData) {
       "pending",
       0, // amount_paid
       totalAmount, // balance_due
+      0,
+      0,
       paymentDeadline,
       "pending",
       false, // confirmation_sent
