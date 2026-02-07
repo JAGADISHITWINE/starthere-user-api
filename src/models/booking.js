@@ -218,7 +218,6 @@ async function createBooking(bookingData) {
     emailService
       .sendBookingConfirmation(booking)
       .then(() => {
-        console.log("Confirmation email sent to:", booking.customer_email);
         // Update confirmation_sent flag
         conn.execute(
           "UPDATE bookings SET confirmation_sent = TRUE WHERE id = ?",
@@ -228,6 +227,29 @@ async function createBooking(bookingData) {
       .catch((err) => {
         console.error("Failed to send confirmation email:", err);
       });
+
+    // 11. Notify admin via admin socket server about new booking
+    try {
+      const ioClient = require('socket.io-client');
+      const adminSocket = ioClient('http://localhost:4001', { transports: ['websocket'], reconnection: false });
+
+      adminSocket.on('connect', () => {
+        adminSocket.emit('booking-created', {
+          bookingId: bookingId,
+          bookingReference: bookingReference,
+          customerName: booking.customer_name || booking.personalInfo?.name || null,
+          trekName: booking.trek_name || booking.trekName || null,
+          createdAt: new Date()
+        });
+        adminSocket.disconnect();
+      });
+
+      adminSocket.on('connect_error', (err) => {
+        console.error('Failed to connect to admin socket server for booking notification', err);
+      });
+    } catch (err) {
+      console.error('Error notifying admin about new booking:', err);
+    }
 
     return {
       success: true,

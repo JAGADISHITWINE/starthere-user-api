@@ -43,10 +43,15 @@ async function getAllUpcoming(req, res) {
         MAX(tb.price) as max_price
       FROM treks t
       LEFT JOIN trek_batches tb ON t.id = tb.trek_id
+        AND tb.start_date > CURDATE()  -- ✅ Only future batches
+        AND (tb.available_slots - tb.booked_slots) > 0  -- ✅ Only available slots
     `;
 
     const conditions = [];
     const params = [];
+
+    // ✅ Only show treks that have at least one valid batch
+    conditions.push("tb.id IS NOT NULL");
 
     // Filter by category
     if (category) {
@@ -102,14 +107,14 @@ async function getAllUpcoming(req, res) {
 
     const [treks] = await conn.execute(query, params);
 
-    // Get batches for each trek
+    // Get batches for each trek (only valid future batches)
     for (let trek of treks) {
       const batchQuery = `
         SELECT 
           tb.*,
           (tb.available_slots - tb.booked_slots) as remaining_slots,
           CASE 
-            WHEN tb.status != 'active' THEN 'sold-out'
+            WHEN tb.status != 'active' THEN 'inactive'
             WHEN (tb.available_slots - tb.booked_slots) <= 0 THEN 'sold-out'
             WHEN (tb.available_slots - tb.booked_slots) <= 3 THEN 'last-seat'
             WHEN (tb.available_slots - tb.booked_slots) <= 10 THEN 'selling-fast'
@@ -117,6 +122,8 @@ async function getAllUpcoming(req, res) {
           END as batch_status
         FROM trek_batches tb
         WHERE tb.trek_id = ?
+          AND tb.start_date > CURDATE()  -- ✅ Only future batches
+          AND (tb.available_slots - tb.booked_slots) > 0  -- ✅ Only available slots
         ORDER BY tb.start_date ASC
       `;
 
@@ -196,14 +203,14 @@ async function getTrekById(req, res) {
       trek.gallery_images = [];
     }
 
-    // Get batches
+    // Get batches - ✅ Only future batches with available slots
     const [batches] = await conn.execute(
       `
       SELECT 
         tb.*,
         (tb.available_slots - tb.booked_slots) as remaining_slots,
         CASE 
-          WHEN tb.status != 'active' THEN 'sold-out'
+          WHEN tb.status != 'active' THEN 'inactive'
           WHEN (tb.available_slots - tb.booked_slots) <= 0 THEN 'sold-out'
           WHEN (tb.available_slots - tb.booked_slots) <= 3 THEN 'last-seat'
           WHEN (tb.available_slots - tb.booked_slots) <= 10 THEN 'selling-fast'
@@ -211,6 +218,8 @@ async function getTrekById(req, res) {
         END as batch_status
       FROM trek_batches tb
       WHERE tb.trek_id = ?
+        AND tb.start_date > CURDATE()  -- ✅ Only future batches
+        AND (tb.available_slots - tb.booked_slots) > 0  -- ✅ Only available slots
       ORDER BY tb.start_date ASC
       `,
       [id]
@@ -302,7 +311,7 @@ async function getTrekBymonth(req, res) {
         tb.status,
         (tb.available_slots - tb.booked_slots) as remaining_slots,
         CASE 
-          WHEN tb.status != 'active' THEN 'sold-out'
+          WHEN tb.status != 'active' THEN 'inactive'
           WHEN (tb.available_slots - tb.booked_slots) <= 0 THEN 'sold-out'
           WHEN (tb.available_slots - tb.booked_slots) <= 3 THEN 'last-seat'
           WHEN (tb.available_slots - tb.booked_slots) <= 10 THEN 'selling-fast'
@@ -311,6 +320,8 @@ async function getTrekBymonth(req, res) {
       FROM treks t
       INNER JOIN trek_batches tb ON t.id = tb.trek_id
       WHERE tb.start_date BETWEEN ? AND ?
+        AND tb.start_date > CURDATE()  -- ✅ Only future batches
+        AND (tb.available_slots - tb.booked_slots) > 0  -- ✅ Only available slots
       ORDER BY tb.start_date ASC, t.name ASC
       `,
       [
@@ -353,11 +364,17 @@ async function getTrekByCategory(req, res) {
   try {
     conn = await db.getConnection();
 
+    // ✅ Only count treks that have at least one valid batch
     const [categories] = await conn.execute(`
-      SELECT DISTINCT category, COUNT(*) as count
-      FROM treks
-      GROUP BY category
-      ORDER BY category
+      SELECT 
+        t.category, 
+        COUNT(DISTINCT t.id) as count
+      FROM treks t
+      INNER JOIN trek_batches tb ON t.id = tb.trek_id
+      WHERE tb.start_date > CURDATE()  -- ✅ Only future batches
+        AND (tb.available_slots - tb.booked_slots) > 0  -- ✅ Only available slots
+      GROUP BY t.category
+      ORDER BY t.category
     `);
 
     const response = {
@@ -413,6 +430,8 @@ async function getTrekByYear(req, res) {
       FROM treks t
       INNER JOIN trek_batches tb ON t.id = tb.trek_id
       WHERE YEAR(tb.start_date) = ?
+        AND tb.start_date > CURDATE()  -- ✅ Only future batches
+        AND (tb.available_slots - tb.booked_slots) > 0  -- ✅ Only available slots
       GROUP BY MONTH(tb.start_date)
       ORDER BY month
       `,
@@ -466,12 +485,14 @@ async function getAllyear(req, res) {
   try {
     conn = await db.getConnection();
 
+    // ✅ Only show years that have future batches with available slots
     const [years] = await conn.execute(`
-      SELECT DISTINCT YEAR(start_date) as year
-      FROM trek_batches
-      WHERE start_date IS NOT NULL
-        AND YEAR(start_date) >= 2000
-        AND YEAR(start_date) <= 2100
+      SELECT DISTINCT YEAR(tb.start_date) as year
+      FROM trek_batches tb
+      WHERE tb.start_date > CURDATE()  -- ✅ Only future batches
+        AND (tb.available_slots - tb.booked_slots) > 0  -- ✅ Only available slots
+        AND YEAR(tb.start_date) >= 2000
+        AND YEAR(tb.start_date) <= 2100
       ORDER BY year ASC
     `);
 

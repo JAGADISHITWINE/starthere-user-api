@@ -7,8 +7,8 @@ async function getDashboardData(req, res) {
 
   try {
     const [rows] = await conn.query(`
-     SELECT
-        t.id,
+      SELECT
+        b.id,
         t.name,
         t.location,
         t.difficulty,
@@ -19,8 +19,14 @@ async function getDashboardData(req, res) {
         b.max_participants,
         b.price,
         t.cover_image,
-        b.available_slots,
+        (b.available_slots - b.booked_slots) AS availableSlots,
         b.duration,
+        CASE 
+          WHEN (b.available_slots - b.booked_slots) <= 0 THEN 'sold-out'
+          WHEN (b.available_slots - b.booked_slots) <= 3 THEN 'last-seat'
+          WHEN (b.available_slots - b.booked_slots) <= 10 THEN 'selling-fast'
+          ELSE 'available'
+        END AS slotStatus,
         (
           SELECT JSON_ARRAYAGG(hh.highlight)
           FROM (
@@ -38,12 +44,14 @@ async function getDashboardData(req, res) {
           FROM trek_batches b2
           WHERE b2.trek_id = t.id
             AND b2.status = 'active'
-          ORDER BY b2.start_date DESC
+
+          ORDER BY b2.start_date ASC
           LIMIT 1
-        );
+        )
+      WHERE b.id IS NOT NULL; 
     `);
 
-     const encryptedResponse = encrypt(rows);
+    const encryptedResponse = encrypt(rows);
 
     res.status(200).json({
       success: true,
@@ -59,10 +67,48 @@ async function getDashboardData(req, res) {
 }
 
 async function getTrekById(req, res) {
-  const trekId = req.params.id;
+  const batchId = req.params.id;  // ✅ Accepting batch_id
   const conn = await db.getConnection();
 
   try {
+    // ✅ First, get the batch to find the trek_id
+    const [[batch]] = await conn.query(
+      `SELECT 
+        id AS batchId, 
+        trek_id AS trekId, 
+        start_date AS startDate, 
+        end_date AS endDate, 
+        available_slots AS availableSlots, 
+        booked_slots AS bookedSlots,
+        (available_slots - booked_slots) AS remainingSlots,
+        price, 
+        min_age AS minAge, 
+        max_age AS maxAge, 
+        min_participants AS minParticipants, 
+        max_participants AS maxParticipants, 
+        duration, 
+        status,
+        CASE 
+          WHEN status != 'active' THEN 'inactive'
+          WHEN (available_slots - booked_slots) <= 0 THEN 'sold-out'
+          WHEN (available_slots - booked_slots) <= 3 THEN 'last-seat'
+          WHEN (available_slots - booked_slots) <= 10 THEN 'selling-fast'
+          ELSE 'available'
+        END AS slotStatus
+      FROM trek_batches 
+      WHERE id = ?`,
+      [batchId]
+    );
+
+    if (!batch) {
+      return res.status(404).json({
+        success: false,
+        message: 'Batch not found'
+      });
+    }
+
+    const trekId = batch.trekId;
+
     // Get basic trek info
     const [[trek]] = await conn.query("SELECT * FROM treks WHERE id = ?", [
       trekId,
@@ -103,57 +149,42 @@ async function getTrekById(req, res) {
     );
     trek.galleryImages = images.map((img) => img.image_url);
 
-    // Get batches
-    const [batches] = await conn.query(
-      "SELECT id AS batchId, trek_id AS trekId, start_date AS startDate, end_date AS endDate, available_slots AS availableSlots, booked_slots, price, min_age, max_age, min_participants, max_participants, duration, status FROM trek_batches WHERE trek_id = ?",
-      [trekId],
+    // ✅ Get inclusions for this batch - USING batch.batchId to be safe
+    const [inclusions] = await conn.query(
+      "SELECT inclusion FROM batch_inclusions WHERE batch_id = ? ORDER BY id",
+      [batch.batchId],
+    );
+    batch.inclusions = inclusions.map((i) => i.inclusion);
+
+    // ✅ Get exclusions for this batch - USING batch.batchId to be safe
+    const [exclusions] = await conn.query(
+      "SELECT exclusion FROM batch_exclusions WHERE batch_id = ? ORDER BY id",
+      [batch.batchId],
+    );
+    batch.exclusions = exclusions.map((e) => e.exclusion);
+    
+    // ✅ Get itinerary days for this batch
+    const [days] = await conn.query(
+      "SELECT id, day_number AS dayNumber, title FROM itinerary_days WHERE batch_id = ? ORDER BY day_number",
+      [batch.batchId],
     );
 
-    // For each batch, get inclusions, exclusions, and itinerary
-    for (const batch of batches) {
-      // Get inclusions
-      const [inclusions] = await conn.query(
-        "SELECT inclusion FROM batch_inclusions WHERE batch_id = ?",
-        [batch.batchId],
+    // For each day, get activities
+    for (const day of days) {
+      const [activities] = await conn.query(
+        "SELECT activity_time AS activityTime, activity_text AS activityText FROM itinerary_activities WHERE day_id = ? ORDER BY activity_time",
+        [day.id],
       );
-      batch.inclusions = inclusions.map((i) => i.inclusion);
+      day.activities = activities;
 
-      // Get exclusions
-      const [exclusions] = await conn.query(
-        "SELECT exclusion FROM batch_exclusions WHERE batch_id = ?",
-        [batch.batchId],
-      );
-      batch.exclusions = exclusions.map((e) => e.exclusion);
-
-      // Get itinerary days
-      const [days] = await conn.query(
-        "SELECT * FROM itinerary_days WHERE batch_id = ? ORDER BY day_number",
-        [batch.batchId],
-      );
-
-      // For each day, get activities
-      for (const day of days) {
-        const [activities] = await conn.query(
-          "SELECT activity_time, activity_text FROM itinerary_activities WHERE day_id = ? ORDER BY activity_time",
-          [day.id],
-        );
-        day.activities = activities.map((a) => ({
-          activityTime: a.activity_time,
-          activityText: a.activity_text,
-        }));
-
-        // Remove internal id from response
-        delete day.created_at;
-      }
-
-      batch.itineraryDays = days;
-
-      // Clean up batch object
-      delete batch.created_at;
-      delete batch.updated_at;
+      // Remove internal id from response
+      delete day.id;
     }
 
-    trek.batches = batches;
+    batch.itineraryDays = days;
+
+    // ✅ Attach only this batch to trek
+    trek.batch = batch;
 
     const encryptedResponse = encrypt(trek);
 
@@ -164,7 +195,7 @@ async function getTrekById(req, res) {
     });
 
   } catch (err) {
-    console.error('Error fetching trek:', err);
+    console.error('Error fetching trek by batch:', err);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch trek',
