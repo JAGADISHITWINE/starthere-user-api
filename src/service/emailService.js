@@ -558,8 +558,50 @@ async function sendPasswordResetEmail(
   await transporter.sendMail(mailOptions);
 };
 
+async function sendOtpEmail(toEmail, otp, userName) {
+  const mailOptions = {
+    from: `"Your App Name" <${process.env.MAIL_USER}>`,
+    to: toEmail,
+    subject: 'Your Email Verification OTP',
+    html: `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <style>
+            body { font-family: Arial, sans-serif; background: #f4f4f4; margin: 0; padding: 0; }
+            .container { max-width: 600px; margin: 40px auto; background: #fff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+            .header { background: #667eea; padding: 32px; text-align: center; }
+            .header h1 { color: #fff; margin: 0; font-size: 24px; }
+            .body { padding: 32px; text-align: center; }
+            .otp-box { display: inline-block; background: #f7f7ff; border: 2px dashed #667eea; border-radius: 12px; padding: 20px 40px; margin: 24px 0; }
+            .otp-code { font-size: 42px; font-weight: 900; letter-spacing: 12px; color: #667eea; font-family: monospace; }
+            .warning { background: #fff8e1; border-left: 4px solid #f59e0b; padding: 12px 16px; border-radius: 4px; color: #92400e; font-size: 13px; text-align: left; margin-top: 16px; }
+            .footer { text-align: center; padding: 16px; color: #aaa; font-size: 12px; border-top: 1px solid #eee; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header"><h1>Email Verification</h1></div>
+            <div class="body">
+              <p>Hi <strong>${userName}</strong>, use the OTP below to verify your email:</p>
+              <div class="otp-box">
+                <div class="otp-code">${otp}</div>
+              </div>
+              <p style="color:#718096; font-size:14px;">This OTP expires in <strong>10 minutes</strong>.</p>
+              <div class="warning">⚠️ Do not share this OTP with anyone. If you did not request this, please ignore this email.</div>
+            </div>
+            <div class="footer">© ${new Date().getFullYear()} Your App Name. All rights reserved.</div>
+          </div>
+        </body>
+      </html>
+    `
+  };
+  await transporter.sendMail(mailOptions);
+};
+
 module.exports = {
   sendBookingConfirmation,
   sendCancellationEmail,
-  sendPasswordResetEmail
+  sendPasswordResetEmail,
+  sendOtpEmail
 };

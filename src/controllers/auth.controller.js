@@ -140,9 +140,6 @@ async function forgotPassword(req, res) {
 }
 
 
-// ─────────────────────────────────────────────
-// POST /api/auth/reset-password
-// ─────────────────────────────────────────────
 async function resetPassword(req, res) {
   try {
     const { token, password } = req.body;
@@ -186,9 +183,6 @@ async function resetPassword(req, res) {
 }
 
 
-// ─────────────────────────────────────────────
-// POST /api/auth/validate-reset-token
-// ─────────────────────────────────────────────
 async function validateResetToken(req, res) {
   try {
     const { token } = req.body;
@@ -213,5 +207,68 @@ async function validateResetToken(req, res) {
   }
 }
 
+async function sendOtp(req, res) {
+  try {
+    const { email, phone } = req.body;
 
-module.exports = { login, register, forgotPassword, resetPassword, validateResetToken };
+    if (!email || !phone) {
+      return res.status(400).json({ response: false, message: 'Email and Phone Number are required' });
+    }
+
+    // Check if email already registered
+    const exists = await UserModel.findUsermailAndNumber(email.toLowerCase(),phone);
+    if (exists) {
+      return res.status(409).json({ response: false, message: 'Email and Phone Number are already registered' });
+    }
+
+    // Generate 6-digit OTP
+    const otp     = Math.floor(100000 + Math.random() * 900000).toString();
+    const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    await UserModel.saveOtp(email.toLowerCase(), otp, expires);
+    await emailService.sendOtpEmail(email, otp);
+
+    return res.status(200).json({
+      response: true,
+      message: 'OTP sent to your email address.'
+    });
+
+  } catch (error) {
+    console.error('Send OTP error:', error);
+    return res.status(500).json({ response: false, message: 'Failed to send OTP' });
+  }
+}
+
+async function verifyOtp(req, res) {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({ response: false, message: 'Email and OTP are required' });
+    }
+
+    const record = await UserModel.findOtp(email.toLowerCase());
+
+    if (!record) {
+      return res.status(400).json({ response: false, message: 'OTP expired. Please request a new one.' });
+    }
+
+    if (record.otp_code !== otp) {
+      return res.status(400).json({ response: false, message: 'Invalid OTP. Please try again.' });
+    }
+
+    // OTP matched — delete it so it can't be reused
+    await UserModel.deleteOtp(email.toLowerCase());
+
+    return res.status(200).json({
+      response: true,
+      message: 'Email verified successfully!'
+    });
+
+  } catch (error) {
+    console.error('Verify OTP error:', error);
+    return res.status(500).json({ response: false, message: 'Internal server error' });
+  }
+}
+
+module.exports = { login, register, forgotPassword, resetPassword, validateResetToken, sendOtp, verifyOtp  };
