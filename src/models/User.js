@@ -4,8 +4,21 @@ const bcrypt = require('bcrypt');
 const findUser = async (email) => {
   try {
     const [rows] = await db.query(
-      'SELECT id, full_name, email, phone_number, password FROM users WHERE email = ?',
+      'SELECT id, full_name, email, phone_number, password FROM users WHERE email = ? ',
       [email]
+    );
+    return rows.length ? rows[0] : null;
+  } catch (error) {
+    console.error('Error in findUser:', error);
+    throw error;
+  }
+};
+
+const findUsermailAndNumber = async (email, phone) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT id, full_name, email, phone_number, password FROM users WHERE email = ? AND phone_number = ?',
+      [email, phone]
     );
     return rows.length ? rows[0] : null;
   } catch (error) {
@@ -84,12 +97,40 @@ const registerUser = async (data) => {
   ]);
 };
 
+// Save OTP against email (before user is fully registered)
+const saveOtp = async (email, otp, expires) => {
+  // Store in a temp table or existing users table
+  await db.execute(
+    `INSERT INTO otp_verifications (email, otp_code, expires_at)
+     VALUES (?, ?, ?)
+     ON DUPLICATE KEY UPDATE otp_code = ?, expires_at = ?`,
+    [email, otp, expires, otp, expires]
+  );
+};
+
+const findOtp = async (email) => {
+  const [rows] = await db.query(
+    `SELECT * FROM otp_verifications 
+     WHERE email = ? AND expires_at > NOW()`,
+    [email]
+  );
+  return rows.length ? rows[0] : null;
+};
+
+const deleteOtp = async (email) => {
+  await db.execute(`DELETE FROM otp_verifications WHERE email = ?`, [email]);
+};
+
 module.exports = {
   findUser,
+  findUsermailAndNumber,
   findUserByResetToken,
   saveResetToken,
   updatePassword,
   validatePassword,
   saveToken,
-  registerUser
+  registerUser,
+  saveOtp,
+  findOtp,
+  deleteOtp
 };
