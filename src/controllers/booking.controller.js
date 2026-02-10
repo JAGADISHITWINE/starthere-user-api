@@ -29,6 +29,7 @@ async function createBookingController(req, res) {
 async function getMyBookingsById(req, res) {
   const conn = await db.getConnection();
   const userId = req.params.id;
+  
   try {
     const [bookings] = await conn.execute(
       `
@@ -50,8 +51,9 @@ async function getMyBookingsById(req, res) {
       [userId],
     );
 
-    // Get add-ons for each booking
+    // Get add-ons and participants for each booking
     for (let booking of bookings) {
+      // Get add-ons
       const [addons] = await conn.execute(
         `
           SELECT addon_name, quantity, unit_price, total_price
@@ -61,7 +63,28 @@ async function getMyBookingsById(req, res) {
         [booking.id],
       );
 
+      // Get participants
+      const [participants] = await conn.execute(
+        `
+          SELECT 
+            id,
+            name,
+            age,
+            gender,
+            id_type,
+            id_number,
+            phone,
+            medical_info,
+            is_primary_contact
+          FROM booking_participants
+          WHERE booking_id = ?
+          ORDER BY is_primary_contact DESC, id ASC
+        `,
+        [booking.id],
+      );
+
       booking.addons = addons;
+      booking.participants_details = participants;
       booking.can_cancel =
         booking.days_until_trek >= 7 &&
         (booking.booking_status === "pending" ||
@@ -133,6 +156,22 @@ async function getReceiptById(req, res) {
       SELECT * FROM booking_addons WHERE booking_id = ?
     `, [bookingId]);
 
+    // Get participants
+    const [participants] = await conn.execute(`
+      SELECT 
+        name,
+        age,
+        gender,
+        id_type,
+        id_number,
+        phone,
+        medical_info,
+        is_primary_contact
+      FROM booking_participants
+      WHERE booking_id = ?
+      ORDER BY is_primary_contact DESC, id ASC
+    `, [bookingId]);
+
     // Create PDF
     const doc = new PDFDocument({ 
       margin: 50,
@@ -153,12 +192,10 @@ async function getReceiptById(req, res) {
       doc.moveTo(50, y).lineTo(545, y).stroke();
     };
 
-
     // Add logo and header
-    const logoPath = path.join(__dirname, '../assets/logo.png'); // Adjust path to your logo
-
-    // Check if logo exists
+    const logoPath = path.join(__dirname, '../assets/logo.png');
     const fs = require('fs');
+    
     if (fs.existsSync(logoPath)) {
       doc.image(logoPath, 50, 40, { width: 80, height: 80 })
         .moveDown(2);
@@ -167,14 +204,12 @@ async function getReceiptById(req, res) {
     doc.fontSize(24)
       .fillColor('#2c3e50')
       .text('BOOKING RECEIPT', { align: 'center' });
-
-
     
     doc.moveDown(0.5);
     drawLine(doc.y);
     doc.moveDown();
 
-    // Booking Reference (highlighted)
+    // Booking Reference
     doc.fontSize(12)
        .fillColor('#34495e')
        .text('Booking Reference: ', { continued: true })
@@ -236,15 +271,108 @@ async function getReceiptById(req, res) {
 
     doc.moveDown(1.5);
 
+    // PARTICIPANTS SECTION (NEW)
+    if (participants && participants.length > 0) {
+      doc.fontSize(16)
+         .fillColor('#2c3e50')
+         .text('Participant Details', { underline: true });
+      doc.moveDown(0.5);
+
+      // Table headers
+      const tableTop = doc.y;
+      const rowHeight = 25;
+      const columnWidths = {
+        no: 30,
+        name: 120,
+        age: 35,
+        gender: 50,
+        idType: 80,
+        idNumber: 100
+      };
+
+      // Header background
+      doc.rect(50, tableTop, 495, rowHeight)
+         .fillAndStroke('#667eea', '#667eea');
+
+      // Header text
+      doc.fillColor('#ffffff')
+         .fontSize(9)
+         .text('#', 55, tableTop + 8, { width: columnWidths.no })
+         .text('Name', 85, tableTop + 8, { width: columnWidths.name })
+         .text('Age', 205, tableTop + 8, { width: columnWidths.age })
+         .text('Gender', 240, tableTop + 8, { width: columnWidths.gender })
+         .text('ID Type', 290, tableTop + 8, { width: columnWidths.idType })
+         .text('ID Number', 370, tableTop + 8, { width: columnWidths.idNumber });
+
+      // Data rows
+      let yPos = tableTop + rowHeight;
+      participants.forEach((participant, index) => {
+        // Alternate row background
+        if (index % 2 === 0) {
+          doc.rect(50, yPos, 495, rowHeight)
+             .fillAndStroke('#f8f9fa', '#e0e0e0');
+        } else {
+          doc.rect(50, yPos, 495, rowHeight)
+             .stroke('#e0e0e0');
+        }
+
+        // Row data
+        doc.fillColor('#2c3e50')
+           .fontSize(8)
+           .text(`${index + 1}`, 55, yPos + 8, { width: columnWidths.no });
+        
+        const nameText = participant.name + (participant.is_primary_contact ? ' ★' : '');
+        doc.text(nameText, 85, yPos + 8, { width: columnWidths.name });
+        doc.text(participant.age || '-', 205, yPos + 8, { width: columnWidths.age });
+        doc.text(participant.gender || '-', 240, yPos + 8, { width: columnWidths.gender });
+        doc.text(participant.id_type || '-', 290, yPos + 8, { width: columnWidths.idType });
+        doc.text(participant.id_number || '-', 370, yPos + 8, { width: columnWidths.idNumber });
+
+        yPos += rowHeight;
+
+        // Add new page if needed
+        if (yPos > 700 && index < participants.length - 1) {
+          doc.addPage();
+          yPos = 50;
+        }
+      });
+
+      doc.y = yPos + 10;
+
+      // Medical info summary (if any)
+      const participantsWithMedicalInfo = participants.filter(
+        p => p.medical_info && p.medical_info.trim() !== ''
+      );
+
+      if (participantsWithMedicalInfo.length > 0) {
+        doc.moveDown(0.5);
+        doc.fontSize(10)
+           .fillColor('#ff9800')
+           .text('⚕ Medical Information:', { underline: true });
+        doc.moveDown(0.3);
+
+        participantsWithMedicalInfo.forEach(p => {
+          doc.fontSize(8)
+             .fillColor('#34495e')
+             .text(`• ${p.name}: `, { continued: true })
+             .fillColor('#2c3e50')
+             .text(p.medical_info);
+          doc.moveDown(0.2);
+        });
+      }
+
+      doc.fontSize(8)
+         .fillColor('#7f8c8d')
+         .text('★ = Primary Contact', { align: 'right' });
+      
+      doc.moveDown(1.5);
+    }
+
     // Payment Details Section
     doc.fontSize(16)
        .fillColor('#2c3e50')
        .text('Payment Summary', { underline: true });
     doc.moveDown(0.5);
-
-    // Create a table-like structure
-    const startY = doc.y;
-    doc.fontSize(11).fillColor('#34495e');
 
     const paymentItems = [
       ['Base Price', `₹${booking.base_price || 0}`],
@@ -252,6 +380,7 @@ async function getReceiptById(req, res) {
       ['Tax (5%)', `₹${booking.tax_amount || 0}`]
     ];
 
+    doc.fontSize(11).fillColor('#34495e');
     paymentItems.forEach(([label, value]) => {
       doc.text(label, 50, doc.y, { width: 400 });
       doc.text(value, 450, doc.y - 11, { width: 95, align: 'right' });
@@ -262,7 +391,7 @@ async function getReceiptById(req, res) {
     drawLine(doc.y);
     doc.moveDown(0.5);
 
-    // Total Amount (highlighted)
+    // Total Amount
     doc.fontSize(14)
        .fillColor('#2c3e50')
        .text('Total Amount', 50, doc.y, { width: 400, bold: true });
@@ -296,7 +425,6 @@ async function getReceiptById(req, res) {
     const bookingStatus = booking.booking_status ? booking.booking_status.toUpperCase() : 'N/A';
     const paymentStatus = booking.payment_status ? booking.payment_status.toUpperCase() : 'N/A';
 
-    // Status with color coding
     const statusColor = bookingStatus === 'CONFIRMED' ? '#27ae60' : '#e74c3c';
     const paymentColor = paymentStatus === 'PAID' ? '#27ae60' : '#e74c3c';
 
@@ -310,9 +438,9 @@ async function getReceiptById(req, res) {
        .fillColor(paymentColor)
        .text(paymentStatus);
 
-    // Add-ons Section (if any)
+    // Add-ons Section
     if (addons && addons.length > 0) {
-      doc.addPage();
+      doc.moveDown(1.5);
       
       doc.fontSize(16)
          .fillColor('#2c3e50')
@@ -322,12 +450,22 @@ async function getReceiptById(req, res) {
       doc.fontSize(11).fillColor('#34495e');
       
       addons.forEach((addon, index) => {
-        doc.text(`${index + 1}. ${addon.name || 'N/A'}`, 50, doc.y, { width: 400 });
+        doc.text(`${index + 1}. ${addon.addon_name || 'N/A'}`, 50, doc.y, { width: 400 });
         doc.fillColor('#2c3e50')
-           .text(`₹${addon.price || 0}`, 450, doc.y - 11, { width: 95, align: 'right' });
+           .text(`₹${addon.total_price || 0}`, 450, doc.y - 11, { width: 95, align: 'right' });
         doc.moveDown(0.5);
       });
     }
+
+    // Footer
+    doc.moveDown(2);
+    drawLine(doc.y);
+    doc.moveDown(0.5);
+    
+    doc.fontSize(8)
+       .fillColor('#7f8c8d')
+       .text('Start Here Tours & Treks | support@starthere.com | +91 1234567890', { align: 'center' });
+    doc.text('Thank you for choosing Start Here Tours & Treks!', { align: 'center' });
 
     // Finalize PDF
     doc.end();
@@ -339,7 +477,6 @@ async function getReceiptById(req, res) {
     console.error('Download receipt error:', error);
     console.error('Error stack:', error.stack);
     
-    // If headers not sent yet, send error response
     if (!res.headersSent) {
       return res.status(500).json({
         success: false,
@@ -390,9 +527,11 @@ async function cancleBooking(req, res) {
         tb.start_date,
         tb.available_slots,
         tb.booked_slots,
-        DATEDIFF(tb.start_date, NOW()) as days_until_trek
+        DATEDIFF(tb.start_date, NOW()) as days_until_trek,
+        t.name as trek_name
       FROM bookings b
       INNER JOIN trek_batches tb ON b.batch_id = tb.id
+      INNER JOIN treks t ON tb.trek_id = t.id
       WHERE b.id = ? AND b.user_id = ?
     `, [bookingId, userId]);
 
@@ -406,6 +545,20 @@ async function cancleBooking(req, res) {
     }
 
     const booking = bookings[0];
+
+    // Get participants for email
+    const [participants] = await conn.execute(`
+      SELECT 
+        name,
+        age,
+        gender,
+        id_type,
+        id_number,
+        is_primary_contact
+      FROM booking_participants
+      WHERE booking_id = ?
+      ORDER BY is_primary_contact DESC, id ASC
+    `, [bookingId]);
 
     // Check if can cancel
     if (booking.booking_status === 'cancelled') {
@@ -462,13 +615,13 @@ async function cancleBooking(req, res) {
     ]);
 
     // Update trek batch slots
-    const participants = parseInt(booking.participants || 0);
+    const participantCount = parseInt(booking.participants || 0);
     await conn.execute(`
       UPDATE trek_batches
       SET available_slots = available_slots + ?,
           booked_slots = booked_slots - ?
       WHERE id = ?
-    `, [participants, participants, booking.batch_id]);
+    `, [participantCount, participantCount, booking.batch_id]);
 
     await conn.commit();
     if (conn) conn.release();
@@ -479,7 +632,8 @@ async function cancleBooking(req, res) {
       refund_amount: refundAmount,
       refund_percentage: refundPercentage,
       cancellation_fee: cancellationFee,
-      cancellation_reason: reason.trim()
+      cancellation_reason: reason.trim(),
+      participants_details: participants
     };
 
     // Send cancellation email (async, don't wait)

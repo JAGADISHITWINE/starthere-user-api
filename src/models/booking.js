@@ -95,19 +95,21 @@ async function createBooking(bookingData) {
 
     const paymentDeadline = new Date(bookingData.startDate);
     paymentDeadline.setDate(paymentDeadline.getDate() - 7); // 7 days before trek
+    
+    const formatMySQL = (date) => {
+      const pad = (n) => (n < 10 ? '0' + n : n);
+      return (
+        date.getFullYear() + '-' +
+        pad(date.getMonth() + 1) + '-' +
+        pad(date.getDate()) + ' ' +
+        pad(date.getHours()) + ':' +
+        pad(date.getMinutes()) + ':' +
+        pad(date.getSeconds())
+      );
+    };
 
-    const startDate = new Date(bookingData.startDate);
-    const endDate = new Date(bookingData.endDate);
-
-    const mysqlStartDate = startDate
-      .toISOString()
-      .slice(0, 19)
-      .replace("T", " ");
-
-    const mysqlEndDate = endDate
-      .toISOString()
-      .slice(0, 19)
-      .replace("T", " ");
+    const mysqlStartDate = formatMySQL(new Date(bookingData.startDate));
+    const mysqlEndDate = formatMySQL(new Date(bookingData.endDate));
 
     const [bookingResult] = await conn.execute(bookingQuery, [
       bookingReference,
@@ -141,7 +143,43 @@ async function createBooking(bookingData) {
 
     const bookingId = bookingResult.insertId;
 
-    // 6. Insert booking add-ons
+    // 6. Insert participant details (NEW)
+    if (bookingData.participantDetails && bookingData.participantDetails.length > 0) {
+      const participantQuery = `
+        INSERT INTO booking_participants (
+          booking_id,
+          name,
+          age,
+          gender,
+          id_type,
+          id_number,
+          phone,
+          medical_info,
+          is_primary_contact
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+
+      for (let i = 0; i < bookingData.participantDetails.length; i++) {
+        const participant = bookingData.participantDetails[i];
+        const isPrimary = i === 0 ? 1 : 0; // First participant is primary contact
+
+        await conn.execute(participantQuery, [
+          bookingId,
+          participant.name,
+          participant.age || null,
+          participant.gender || null,
+          participant.idType || null,
+          participant.idNumber || null,
+          participant.phone || null,
+          participant.medicalInfo || null,
+          isPrimary,
+        ]);
+      }
+
+      console.log(`✓ Inserted ${bookingData.participantDetails.length} participant(s) for booking ${bookingReference}`);
+    }
+
+    // 7. Insert booking add-ons
     if (bookingData.selectedAddOns && bookingData.selectedAddOns.length > 0) {
       const addonQuery = `
         INSERT INTO booking_addons (
@@ -171,7 +209,7 @@ async function createBooking(bookingData) {
       }
     }
 
-    // 7. Update trek batch available slots
+    // 8. Update trek batch available slots
     const updateSlotsQuery = `
       UPDATE trek_batches 
       SET 
@@ -192,10 +230,10 @@ async function createBooking(bookingData) {
       throw new Error("INSUFFICIENT_SLOTS");
     }
 
-    // 8. Commit transaction
+    // 9. Commit transaction
     await conn.commit();
 
-    // 9. Fetch complete booking details
+    // 10. Fetch complete booking details with participants
     const [bookingDetails] = await conn.execute(
       `
       SELECT 
@@ -214,10 +252,34 @@ async function createBooking(bookingData) {
 
     const booking = bookingDetails[0];
 
-    // 10. Send confirmation email (async, don't wait)
+    // Fetch participant details
+    const [participants] = await conn.execute(
+      `
+      SELECT 
+        id,
+        name,
+        age,
+        gender,
+        id_type,
+        id_number,
+        phone,
+        medical_info,
+        is_primary_contact
+      FROM booking_participants
+      WHERE booking_id = ?
+      ORDER BY is_primary_contact DESC, id ASC
+    `,
+      [bookingId],
+    );
+
+    booking.participants_details = participants;
+
+    // 11. Send confirmation email (async, don't wait)
     emailService
       .sendBookingConfirmation(booking)
       .then(() => {
+        console.log(`✓ Confirmation email sent for booking ${bookingReference}`);
+        
         // Update confirmation_sent flag
         conn.execute(
           "UPDATE bookings SET confirmation_sent = TRUE WHERE id = ?",
@@ -228,17 +290,22 @@ async function createBooking(bookingData) {
         console.error("Failed to send confirmation email:", err);
       });
 
-    // 11. Notify admin via admin socket server about new booking
+    // 12. Notify admin via admin socket server about new booking
     try {
       const ioClient = require('socket.io-client');
-      const adminSocket = ioClient('http://localhost:4001', { transports: ['websocket'], reconnection: false });
+      const adminSocket = ioClient('http://localhost:4001', { 
+        transports: ['websocket'], 
+        reconnection: false 
+      });
 
       adminSocket.on('connect', () => {
         adminSocket.emit('booking-created', {
           bookingId: bookingId,
           bookingReference: bookingReference,
-          customerName: booking.customer_name || booking.personalInfo?.name || null,
-          trekName: booking.trek_name || booking.trekName || null,
+          customerName: booking.customer_name || bookingData.personalInfo?.name || null,
+          trekName: booking.trek_name || bookingData.trekName || null,
+          participants: bookingData.participants,
+          totalAmount: totalAmount,
           createdAt: new Date()
         });
         adminSocket.disconnect();
@@ -257,6 +324,7 @@ async function createBooking(bookingData) {
       booking: booking,
       bookingId: bookingId,
       bookingReference: bookingReference,
+      participantCount: participants.length,
     };
   } catch (error) {
     // Rollback transaction on error
