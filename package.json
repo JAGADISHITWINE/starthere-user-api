@@ -14,7 +14,7 @@
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "crypto-js": "^4.2.0",
-    "dotenv": "^17.2.3",
+    "dotenv": "^17.2.4",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "marked": "^15.0.12",
