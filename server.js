@@ -3,6 +3,7 @@ const cors = require('cors');
 const authRoutes = require('./src/routes/auth.routes'); 
 require('dotenv').config();
 const app = express();
+const path = require('path');
 
 app.use(express.json()); // Middleware to parse JSON request bodies
 app.use(cors()); // Optional
@@ -15,6 +16,11 @@ app.use('/api/auth', authRoutes);
 app.get('/', (req, res) => {
     res.send('Server is running...');
 });
+
+app.use(
+  '/uploads',
+  express.static(path.join(__dirname, 'uploads'))
+);
 
 // Start the server
 const PORT = process.env.PORT;
