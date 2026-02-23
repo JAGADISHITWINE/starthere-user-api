@@ -3,8 +3,8 @@ const ctrl = require('../controllers/auth.controller');
 const trek = require('../controllers/trek.controlller');
 const booking = require('../controllers/booking.controller');
 const upcoming = require('../controllers/upcoming.controller');
-const blog = require('../controllers/blog.controller');
-const uploadPost = require('../middleware/upload');
+const blogController = require('../controllers/blog.controller');
+const upload = require('../middleware/upload'); 
 
 // ========== AUTH ROUTES ==========
 router.post('/login', ctrl.login);
@@ -27,30 +27,37 @@ router.get('/getMyBookingsById/:id', booking.getMyBookingsById);
 router.get('/bookings/:userId/:bookingId/receipt', booking.getReceiptById);
 router.post('/bookings/:bookingId/cancel', booking.cancleBooking);
 
-// ========== BLOG ROUTES (PUBLIC) - Must come BEFORE upcoming routes ==========
-router.get('/blog/posts/featured', blog.getFeaturedPosts);
-router.get('/blog/posts/category/:category', blog.getPostsByCategory);
-router.get('/blog/posts/:idOrSlug', blog.getPublishedPostByIdOrSlug);
-router.get('/blog/posts', blog.getPublishedPosts);
-router.post('/blog/posts/:id/view', blog.incrementViewCount);
+// Public routes
+router.get('/blog/posts/related', blogController.getRelatedPosts);
+router.get('/blog/posts', blogController.getAllPosts);
+router.get('/blog/posts/:id', blogController.getPostById);
+router.get('/blog/posts/:id/comments', blogController.getComments);
+router.get('/blog/categories', blogController.getCategories);
+router.get('/blog/tags', blogController.getTags);
 
-// ========== BLOG ADMIN ROUTES ==========
-router.get('/postEditor/:id', blog.getPostById);
-router.get('/postEditor', blog.getAllPosts);
-router.post('/postEditor', uploadPost.single('image'), blog.createPost);
-router.put('/postEditor/:id', uploadPost.single('image'), blog.updatePost);
-router.delete('/postEditor/:id', blog.deletePost);
-router.patch('/postEditor/:id/publish', blog.publishPost);
+// Protected routes
+router.post('/blog/posts', upload.single('image'), blogController.createPost);
+router.put('/blog/posts/:id',blogController.updatePost);
+router.delete('/blog/posts/:id',blogController.deletePost);
 
-// ========== CATEGORIES ROUTE ==========
-router.get('/categories', blog.getCategories);
+// Comment routes (require auth)
+router.post('/blog/comments', blogController.addComment);
+router.put('/blog/comments/:id',  blogController.updateComment);
+router.post('/blog/comments/:id',  blogController.deleteComment);
+
+// Like routes (optional auth - works with or without login)
+router.post('/blog/posts/:id/like',  blogController.likePost);
+router.post('/blog/comments/:id/like', blogController.likeComment);
+
+// View tracking
+router.post('/blog/posts/:id/view', blogController.incrementView);
 
 // ========== UPCOMING ROUTES - Must come AFTER specific routes ==========
-router.get('/upcoming/by-month/:year/:month', upcoming.getTrekBymonth);
-router.get('/upcoming/meta/categories', upcoming.getTrekByCategory);
-router.get('/upcoming/stats/monthly/:year', upcoming.getTrekByYear);
-router.get('/upcoming/meta/available-years', upcoming.getAllyear);
-router.get('/upcoming/:id', upcoming.getTrekById);
-router.get('/upcoming', upcoming.getAllUpcoming);
+router.get('/by-month/:year/:month', upcoming.getTrekBymonth);
+router.get('/meta/categories', upcoming.getTrekByCategory);
+router.get('/stats/monthly/:year', upcoming.getTrekByYear);
+router.get('/meta/available-years', upcoming.getAllyear);
+router.get('/:id', upcoming.getTrekById);
+router.get('/', upcoming.getAllUpcoming);
 
 module.exports = router;
