@@ -176,7 +176,8 @@ async function createBooking(bookingData) {
         ]);
       }
 
-      console.log(`✓ Inserted ${bookingData.participantDetails.length} participant(s) for booking ${bookingReference}`);
+      // Participant insertion done. Avoid logging participant PII in production.
+      console.info(`Inserted ${bookingData.participantDetails.length} participants for booking ${bookingReference}`);
     }
 
     // 7. Insert booking add-ons
@@ -278,22 +279,19 @@ async function createBooking(bookingData) {
     emailService
       .sendBookingConfirmation(booking)
       .then(() => {
-        console.log(`✓ Confirmation email sent for booking ${bookingReference}`);
-        
-        // Update confirmation_sent flag
-        conn.execute(
-          "UPDATE bookings SET confirmation_sent = TRUE WHERE id = ?",
-          [bookingId],
-        );
+        // Mark confirmation sent; avoid exposing booking details in logs
+        console.info(`Confirmation email queued for booking ${bookingReference}`);
+        conn.execute("UPDATE bookings SET confirmation_sent = TRUE WHERE id = ?", [bookingId]);
       })
       .catch((err) => {
-        console.error("Failed to send confirmation email:", err);
+        console.error("Failed to send confirmation email:", err.message || err);
       });
 
     // 12. Notify admin via admin socket server about new booking
     try {
       const ioClient = require('socket.io-client');
-      const adminSocket = ioClient('http://localhost:4001', { 
+      const adminSocketUrl = process.env.ADMIN_SOCKET_URL || 'http://localhost:4001';
+      const adminSocket = ioClient(adminSocketUrl, { 
         transports: ['websocket'], 
         reconnection: false 
       });

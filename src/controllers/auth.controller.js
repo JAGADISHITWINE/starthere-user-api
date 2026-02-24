@@ -33,7 +33,7 @@ async function login(req, res) {
         phone: user.phone_number
       },
       process.env.JWT_SECRET,
-      { expiresIn: '1d' }
+      { expiresIn: '15m' }
     );
 
     await UserModel.saveToken(user.id, token);

@@ -78,8 +78,17 @@ const validatePassword = async (password, hashedPassword) => {
   return bcrypt.compare(password, hashedPassword);
 };
 
+const crypto = require('crypto');
+
+// Save a hash of the token instead of raw token to avoid storing tokens in plaintext
 const saveToken = async (id, token) => {
-  await db.execute(`UPDATE users SET token = ? WHERE id = ?`, [token, id]);
+  try {
+    const hashed = crypto.createHash('sha256').update(token).digest('hex');
+    await db.execute(`UPDATE users SET token = ? WHERE id = ?`, [hashed, id]);
+  } catch (err) {
+    console.error('Error saving token hash:', err.message || err);
+    throw err;
+  }
 };
 
 const registerUser = async (data) => {
