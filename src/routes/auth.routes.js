@@ -19,7 +19,7 @@ router.post('/validate-reset-token', ctrl.validateResetToken);
 router.get('/dashData', trek.getDashboardData);
 
 // ========== TREK ROUTES ==========
-router.get('/getTrekById/:id', trek.getTrekById);
+router.get('/getTrekByUuid/:id', trek.getTrekById);
 
 // ========== BOOKING ROUTES ==========
 router.post('/booking', booking.createBookingController);
