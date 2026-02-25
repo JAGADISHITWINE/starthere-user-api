@@ -5,6 +5,7 @@ const booking = require('../controllers/booking.controller');
 const upcoming = require('../controllers/upcoming.controller');
 const blogController = require('../controllers/blog.controller');
 const upload = require('../middleware/upload'); 
+const { requireAuth } = require('../middleware/auth');
 
 // ========== AUTH ROUTES ==========
 router.post('/login', ctrl.login);
@@ -20,6 +21,7 @@ router.get('/dashData', trek.getDashboardData);
 
 // ========== TREK ROUTES ==========
 router.get('/getTrekByUuid/:id', trek.getTrekById);
+router.get('/getAllTreks', trek.getAllTreks);
 
 // ========== BOOKING ROUTES ==========
 router.post('/booking', booking.createBookingController);
@@ -36,14 +38,14 @@ router.get('/blog/categories', blogController.getCategories);
 router.get('/blog/tags', blogController.getTags);
 
 // Protected routes
-router.post('/blog/posts', upload.single('image'), blogController.createPost);
-router.put('/blog/posts/:id',blogController.updatePost);
-router.delete('/blog/posts/:id',blogController.deletePost);
+router.post('/blog/posts', requireAuth, upload.single('image'), blogController.createPost);
+router.put('/blog/posts/:id', requireAuth, blogController.updatePost);
+router.delete('/blog/posts/:id', requireAuth, blogController.deletePost);
 
 // Comment routes (require auth)
-router.post('/blog/comments', blogController.addComment);
-router.put('/blog/comments/:id',  blogController.updateComment);
-router.post('/blog/comments/:id',  blogController.deleteComment);
+router.post('/blog/comments', requireAuth, blogController.addComment);
+router.put('/blog/comments/:id', requireAuth, blogController.updateComment);
+router.post('/blog/comments/:id', requireAuth, blogController.deleteComment);
 
 // Like routes (optional auth - works with or without login)
 router.post('/blog/posts/:id/like',  blogController.likePost);
@@ -59,5 +61,6 @@ router.get('/stats/monthly/:year', upcoming.getTrekByYear);
 router.get('/meta/available-years', upcoming.getAllyear);
 router.get('/:id', upcoming.getTrekById);
 router.get('/', upcoming.getAllUpcoming);
+
 
 module.exports = router;

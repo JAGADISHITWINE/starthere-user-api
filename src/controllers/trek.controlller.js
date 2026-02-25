@@ -206,4 +206,150 @@ async function getTrekById(req, res) {
   }
 }
 
-module.exports = { getDashboardData, getTrekById };
+async function getAllTreks(req, res) {
+  const conn = await db.getConnection();
+
+  try {
+    /* =======================
+       1️⃣ Fetch all treks (summary)
+    ======================= */
+    const [treks] = await conn.query(`
+      SELECT 
+        t.id,
+        t.name,
+        t.location,
+        t.category,
+        t.difficulty,
+        t.fitness_level,
+        t.description,
+        t.cover_image,
+        MIN(b.duration) AS duration,
+        MIN(b.start_date) AS earliest_start_date,
+        MAX(b.end_date) AS latest_end_date,
+        MIN(b.price) AS starting_price,
+        MAX(b.price) AS max_price,
+        SUM(b.available_slots) AS total_available_slots,
+        SUM(b.booked_slots) AS total_booked_slots,
+        SUM(b.available_slots - b.booked_slots) AS total_remaining_slots,
+        COUNT(DISTINCT b.id) AS total_batches,
+        COUNT(DISTINCT CASE WHEN b.status = 'active' THEN b.id END) AS active_batches,
+        COUNT(DISTINCT CASE WHEN b.status = 'inactive' THEN b.id END) AS inactive_batches,
+        COUNT(DISTINCT CASE WHEN b.status = 'cancelled' THEN b.id END) AS cancelled_batches,
+        COUNT(DISTINCT CASE WHEN b.status = 'completed' THEN b.id END) AS completed_batches,
+        t.created_at,
+        t.updated_at
+      FROM treks t
+      LEFT JOIN trek_batches b ON b.trek_id = t.id
+      GROUP BY t.id
+      ORDER BY t.created_at DESC
+    `);
+
+    /* =======================
+       2️⃣ Fetch all batches
+    ======================= */
+    const [allBatches] = await conn.query(`
+      SELECT 
+        id,
+        trek_id,
+        DATE_FORMAT(start_date, '%Y-%m-%d') AS startDate,
+        DATE_FORMAT(end_date, '%Y-%m-%d') AS endDate,
+        status,
+        price,
+        available_slots,
+        booked_slots,
+        duration,
+        (available_slots - booked_slots) AS remainingSlots
+      FROM trek_batches
+      ORDER BY start_date ASC
+    `);
+
+    // Group batches by trek_id
+    const batchMap = {};
+    for (const batch of allBatches) {
+      if (!batchMap[batch.trek_id]) {
+        batchMap[batch.trek_id] = [];
+      }
+      batchMap[batch.trek_id].push(batch);
+    }
+
+    /* =======================
+       3️⃣ Fetch highlight counts
+    ======================= */
+    const [highlights] = await conn.query(`
+      SELECT trek_id, COUNT(*) AS highlight_count
+      FROM trek_highlights
+      GROUP BY trek_id
+    `);
+
+    const highlightMap = {};
+    for (const h of highlights) {
+      highlightMap[h.trek_id] = h.highlight_count;
+    }
+
+    /* =======================
+       4️⃣ Attach everything
+    ======================= */
+    for (const trek of treks) {
+      trek.batches = batchMap[trek.id] || [];
+      trek.highlight_count = highlightMap[trek.id] || 0;
+
+      trek.earliest_start_date = trek.earliest_start_date
+        ? new Date(trek.earliest_start_date).toISOString().split("T")[0]
+        : null;
+
+      trek.latest_end_date = trek.latest_end_date
+        ? new Date(trek.latest_end_date).toISOString().split("T")[0]
+        : null;
+
+      trek.has_batches = trek.batches.length > 0;
+      trek.has_available_slots = trek.batches.some(
+        b => b.status === "active" && b.remainingSlots > 0
+      );
+    }
+
+    /* =======================
+       5️⃣ Trek counts
+    ======================= */
+    const [[totalCount]] = await conn.query(`
+      SELECT COUNT(*) AS total_trek_count FROM treks
+    `);
+
+    const [[activeCount]] = await conn.query(`
+      SELECT COUNT(DISTINCT t.id) AS active_trek_count
+      FROM treks t
+      JOIN trek_batches b ON b.trek_id = t.id
+      WHERE b.status = 'active'
+        AND b.start_date >= CURDATE()
+        AND (b.available_slots - b.booked_slots) > 0
+    `);
+
+    /* =======================
+       6️⃣ Response
+    ======================= */
+    const response = {
+      count: treks.length,
+      totalTreks: totalCount.total_trek_count,
+      activeTrekCount: activeCount.active_trek_count,
+      result: treks
+    };
+
+    const encryptedResponse = encrypt(response);
+
+    res.status(200).json({
+      success: true,
+      data: encryptedResponse
+    });
+
+  } catch (err) {
+    console.error("Error fetching treks:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch treks",
+      error: err.message
+    });
+  } finally {
+    conn.release();
+  }
+}
+
+module.exports = { getDashboardData, getTrekById , getAllTreks };

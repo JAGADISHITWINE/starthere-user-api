@@ -289,31 +289,38 @@ async function createBooking(bookingData) {
 
     // 12. Notify admin via admin socket server about new booking
     try {
-      const ioClient = require('socket.io-client');
-      const adminSocketUrl = process.env.ADMIN_SOCKET_URL || 'http://localhost:4001';
-      const adminSocket = ioClient(adminSocketUrl, { 
-        transports: ['websocket'], 
-        reconnection: false 
+      const ioClient = require("socket.io-client");
+      const adminSocketUrl = process.env.ADMIN_SOCKET_URL || "http://localhost:4001";
+      const adminSocket = ioClient(adminSocketUrl, {
+        transports: ["websocket"],
+        reconnection: false,
       });
 
-      adminSocket.on('connect', () => {
-        adminSocket.emit('booking-created', {
+      adminSocket.on("connect", () => {
+        const notificationPayload = {
           bookingId: bookingId,
           bookingReference: bookingReference,
           customerName: booking.customer_name || bookingData.personalInfo?.name || null,
           trekName: booking.trek_name || bookingData.trekName || null,
           participants: bookingData.participants,
           totalAmount: totalAmount,
-          createdAt: new Date()
+          createdAt: new Date().toISOString(),
+        };
+
+        // Wait for an acknowledgement so we don't disconnect before message delivery.
+        adminSocket.timeout(3000).emit("booking-created", notificationPayload, (err) => {
+          if (err) {
+            console.error("Admin booking notification acknowledgement timed out");
+          }
+          adminSocket.disconnect();
         });
-        adminSocket.disconnect();
       });
 
-      adminSocket.on('connect_error', (err) => {
-        console.error('Failed to connect to admin socket server for booking notification', err);
+      adminSocket.on("connect_error", (err) => {
+        console.error("Failed to connect to admin socket server for booking notification", err);
       });
     } catch (err) {
-      console.error('Error notifying admin about new booking:', err);
+      console.error("Error notifying admin about new booking:", err);
     }
 
     return {

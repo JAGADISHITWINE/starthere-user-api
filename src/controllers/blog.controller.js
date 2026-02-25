@@ -475,18 +475,18 @@ async function addComment(req, res) {
   try {
 
     const decrypted = decrypt(req.body.encryptedPayload);
-    const { post_id, content, parent_id, user_id } = decrypted;
+    const { post_id, content, parent_id } = decrypted;
+    const userIdNum = Number(req.user?.id);
 
 
-    if (!content || !post_id || !user_id) {
+    if (!content || !post_id || !userIdNum) {
       return res.status(400).json({
         success: false,
-        message: 'Post ID, User ID and content are required'
+        message: 'Post ID and content are required'
       });
     }
 
     const postIdNum = parseInt(post_id);
-    const userIdNum = parseInt(user_id);
     const parentIdNum = parent_id ? parseInt(parent_id) : null;
 
     // Get user info
@@ -547,11 +547,10 @@ async function addComment(req, res) {
 // Delete a comment
 async function deleteComment(req, res) {
   try {
-    const decrypted = decrypt(req.body.encryptedPayload);
-    const { user_id } = decrypted;
+    const userId = Number(req.user?.id);
     const commentId = parseInt(req.params.id);
 
-    if (!user_id) {
+    if (!userId) {
       return res.status(401).json({
         success: false,
         message: "Unauthorized"
@@ -572,7 +571,7 @@ async function deleteComment(req, res) {
 
     const comment = rows[0];
 
-    if (comment.user_id !== user_id) {
+    if (Number(comment.user_id) !== userId) {
       return res.status(403).json({
         success: false,
         message: "Not authorized to delete this comment"
@@ -627,6 +626,16 @@ async function createPost(req, res) {
 
   const decrypted = decrypt(req.body.encryptedPayload);
   try {
+    const userId = Number(req.user?.id);
+    const userType = req.user?.type || 'user';
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized'
+      });
+    }
+
     const {
       title,
       slug,
@@ -636,8 +645,6 @@ async function createPost(req, res) {
       tags,
       status = 'draft',
       publishDate,
-      author,
-      userId,
       existingImageUrl
     } = decrypted
       ;
@@ -670,8 +677,8 @@ async function createPost(req, res) {
         excerpt || '',
         content,
         categoryId,
-        userId || null,
-        'user',
+        userId,
+        userType,
         featured_image,
         status,
         status === 'published' ? new Date(publishDate) : null
@@ -750,7 +757,7 @@ async function updatePost(req, res) {
     const post = posts[0];
 
     // Check authorization
-    const isOwner = post.author_id === userId && post.author_type === userType;
+    const isOwner = Number(post.author_id) === Number(userId) && post.author_type === userType;
     const isAdmin = userType === 'admin';
 
     if (!isOwner && !isAdmin) {
@@ -859,7 +866,7 @@ async function deletePost(req, res) {
     const post = posts[0];
 
     // Check authorization
-    const isOwner = post.author_id === userId && post.author_type === userType;
+    const isOwner = Number(post.author_id) === Number(userId) && post.author_type === userType;
     const isAdmin = userType === 'admin';
 
     if (!isOwner && !isAdmin) {
@@ -929,7 +936,8 @@ async function updateComment(req, res) {
   try {
     const commentId = req.params.id;
     const decrypted = decrypt(req.body.encryptedPayload);
-    const { content, user_id } = decrypted;
+    const { content } = decrypted;
+    const userId = Number(req.user?.id);
 
     if (!content || !content.trim()) {
       return res.status(400).json({
@@ -954,7 +962,7 @@ async function updateComment(req, res) {
     const comment = commentRows[0];
 
     // 🔐 Check ownership
-    if (comment.user_id !== user_id) {
+    if (Number(comment.user_id) !== userId) {
       return res.status(403).json({
         success: false,
         message: "Unauthorized to update this comment"
