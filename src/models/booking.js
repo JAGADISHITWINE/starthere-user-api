@@ -169,7 +169,7 @@ async function createBooking(bookingData) {
           participant.age || null,
           participant.gender || null,
           participant.idType || null,
-          participant.idNumber || null,
+          maskIdNumber(participant.idNumber) || null,
           participant.phone || null,
           participant.medicalInfo || null,
           isPrimary,
@@ -363,6 +363,15 @@ function generateBookingReference(trekId, batchId, startDate) {
   const dateStr = date.toISOString().split("T")[0].replace(/-/g, "");
   const randomStr = Math.random().toString(36).substring(2, 6).toUpperCase();
   return `TRK${trekId}-B${batchId}-${dateStr}-${randomStr}`;
+}
+
+// Add this helper function above createBooking
+function maskIdNumber(idNumber) {
+  if (!idNumber) return null;
+  const clean = idNumber.replace(/\s/g, ''); // remove spaces (e.g. Aadhar formatting)
+  if (clean.length <= 4) return clean;        // too short to mask
+  const masked = '*'.repeat(clean.length - 4) + clean.slice(-4);
+  return masked;
 }
 
 module.exports = {
