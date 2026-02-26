@@ -27,7 +27,7 @@ router.get('/getAllTreks', trek.getAllTreks);
 router.post('/booking', booking.createBookingController);
 router.get('/getMyBookingsById/:id', booking.getMyBookingsById);
 router.get('/bookings/:userId/:bookingId/receipt', booking.getReceiptById);
-router.post('/bookings/:bookingId/cancel', booking.cancleBooking);
+router.post('/bookings/:bookingId/cancel', booking.cancelBooking);
 
 // Public routes
 router.get('/blog/posts/related', blogController.getRelatedPosts);

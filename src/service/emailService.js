@@ -312,12 +312,12 @@ async function sendBookingConfirmation(booking) {
     <p>We look forward to having you on this amazing trek!</p>
     
     <p>Best regards,<br>
-    <strong>Start Here Tours & Treks Team</strong></p>
+    <strong>goWILD Karunadu Team</strong></p>
   </div>
   
   <div class="footer">
     <p>This is an automated email. Please do not reply to this email.</p>
-    <p>&copy; ${new Date().getFullYear()} Start Here Tours & Treks. All rights reserved.</p>
+    <p>&copy; ${new Date().getFullYear()} goWILD Karunadu. All rights reserved.</p>
     <p style="font-size: 12px; color: #999; margin-top: 10px;">
       Booking Reference: ${booking.booking_reference} | 
       Trek ID: ${booking.trek_id} | 
@@ -343,7 +343,7 @@ async function sendBookingConfirmation(booking) {
 
     // Email options
     const mailOptions = {
-      from: `"Start Here Tours & Treks" <${process.env.SMTP_USER}>`,
+      from: `"goWILD Karunadu" <${process.env.SMTP_USER}>`,
       to: booking.customer_email,
       subject: `Booking Confirmed - ${booking.trek_name} (${booking.booking_reference})`,
       html: emailHtml,
@@ -375,10 +375,10 @@ IMPORTANT:
 - Arrive 30 minutes before departure
 - Check weather conditions before the trek
 
-Thank you for choosing Start Here Tours & Treks!
+Thank you for choosing goWILD Karunadu!
 
 Best regards,
-Start Here Tours & Treks Team
+goWILD Karunadu Team
 
 ---
 This is an automated email. For support, contact:
@@ -481,14 +481,14 @@ async function sendCancellationEmail(booking) {
 
     <p>If you have any questions, please contact us.</p>
     
-    <p>Best regards,<br><strong>Start Here Tours & Treks Team</strong></p>
+    <p>Best regards,<br><strong>goWILD Karunadu Team</strong></p>
   </div>
 </body>
 </html>
     `;
 
     const mailOptions = {
-      from: `"Start Here Tours & Treks" <${process.env.SMTP_USER}>`,
+      from: `"goWILD Karunadu" <${process.env.SMTP_USER}>`,
       to: booking.customer_email,
       subject: `Booking Cancelled - ${booking.booking_reference}`,
       html: emailHtml

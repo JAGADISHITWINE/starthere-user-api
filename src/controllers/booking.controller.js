@@ -487,176 +487,238 @@ async function getReceiptById(req, res) {
   }
 }
 
-async function cancleBooking(req, res) {
+async function cancelBooking(req, res) {
   let conn;
-  
+
   try {
     conn = await db.getConnection();
-    
-    const bookingId = req.params.bookingId;
+
+    const bookingId = parseInt(req.params.bookingId);
     const { userId, reason, acceptedTerms } = req.body;
 
-    // Validation
+    // ===============================
+    // 1️⃣ BASIC VALIDATION
+    // ===============================
     if (!bookingId || !userId) {
       return res.status(400).json({
         success: false,
-        message: 'Booking ID and User ID are required'
+        message: "Booking ID and User ID are required"
       });
     }
 
     if (!acceptedTerms) {
       return res.status(400).json({
         success: false,
-        message: 'You must accept the cancellation terms'
+        message: "You must accept cancellation terms"
       });
     }
 
-    if (!reason || reason.trim() === '') {
+    if (!reason || !reason.trim()) {
       return res.status(400).json({
         success: false,
-        message: 'Cancellation reason is required'
+        message: "Cancellation reason is required"
       });
     }
 
     await conn.beginTransaction();
 
-    // Get booking details
-    const [bookings] = await conn.execute(`
+    // ===============================
+    // 2️⃣ LOCK BOOKING + BATCH
+    // ===============================
+    const [rows] = await conn.execute(`
       SELECT 
         b.*,
+        tb.max_participants,
         tb.start_date,
-        tb.available_slots,
-        tb.booked_slots,
-        DATEDIFF(tb.start_date, NOW()) as days_until_trek,
-        t.name as trek_name
+        DATEDIFF(tb.start_date, NOW()) AS days_until_trek
       FROM bookings b
       INNER JOIN trek_batches tb ON b.batch_id = tb.id
-      INNER JOIN treks t ON tb.trek_id = t.id
       WHERE b.id = ? AND b.user_id = ?
+      FOR UPDATE
     `, [bookingId, userId]);
 
-    if (bookings.length === 0) {
+    if (rows.length === 0) {
       await conn.rollback();
-      if (conn) conn.release();
-      return res.status(200).json({
+      return res.status(404).json({
         success: false,
-        message: 'Booking not found'
+        message: "Booking not found"
       });
     }
 
-    const booking = bookings[0];
+    const booking = rows[0];
 
-    // Get participants for email
-    const [participants] = await conn.execute(`
-      SELECT 
-        name,
-        age,
-        gender,
-        id_type,
-        id_number,
-        is_primary_contact
-      FROM booking_participants
-      WHERE booking_id = ?
-      ORDER BY is_primary_contact DESC, id ASC
-    `, [bookingId]);
-
-    // Check if can cancel
-    if (booking.booking_status === 'cancelled') {
+    // ===============================
+    // 3️⃣ BUSINESS RULES
+    // ===============================
+    if (booking.booking_status === "cancelled") {
       await conn.rollback();
-      if (conn) conn.release();
-      return res.status(200).json({
+      return res.status(400).json({
         success: false,
-        message: 'Booking is already cancelled'
+        message: "Booking already cancelled"
       });
     }
 
     if (booking.days_until_trek < 7) {
       await conn.rollback();
-      if (conn) conn.release();
-      return res.status(200).json({
+      return res.status(400).json({
         success: false,
-        message: 'Cannot cancel booking within 7 days of trek. No refund available.'
+        message: "Cannot cancel within 7 days of trek"
       });
     }
 
-    // Calculate refund based on cancellation policy
-    const totalAmount = parseFloat(booking.total_amount || 0);
-    let refundAmount = 0;
+    const participantCount = parseInt(booking.participants || 0);
+    if (participantCount <= 0) {
+      await conn.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "Invalid participant count"
+      });
+    }
+
+    // ===============================
+    // 4️⃣ REFUND PERCENTAGE LOGIC
+    // ===============================
     let refundPercentage = 0;
 
     if (booking.days_until_trek >= 30) {
-      refundAmount = totalAmount;
       refundPercentage = 100;
     } else if (booking.days_until_trek >= 15) {
-      refundAmount = totalAmount * 0.75;
       refundPercentage = 75;
-    } else if (booking.days_until_trek >= 7) {
-      refundAmount = totalAmount * 0.50;
+    } else {
       refundPercentage = 50;
     }
 
-    const cancellationFee = totalAmount - refundAmount;
+    // ===============================
+    // 5️⃣ CALCULATE REFUND
+    // ===============================
+    const baseAmount = parseFloat(booking.subtotal || 0);
+    const gstAmount = parseFloat(booking.tax_amount || 0);
+    const totalAmount = parseFloat(booking.total_amount || 0);
+    const amountPaid = parseFloat(booking.amount_paid || 0);
 
-    // Update booking status
+    const baseRefund = (baseAmount * refundPercentage) / 100;
+    const gstRefund = (gstAmount * refundPercentage) / 100;
+    const grossRefund = baseRefund + gstRefund;
+
+    // Never refund more than paid
+    const finalRefund = Math.min(grossRefund, amountPaid);
+    const cancellationFee = totalAmount - finalRefund;
+
+    // ===============================
+    // 6️⃣ UPDATE BOOKING
+    // ===============================
     await conn.execute(`
-      UPDATE bookings 
-      SET booking_status = 'cancelled',
-          cancelled_at = NOW(),
-          cancellation_reason = ?,
-          refund_amount = ?,
-          cancellation_fee = ?,
-          payment_status = 'refunded'
+      UPDATE bookings
+      SET 
+        booking_status = 'cancelled',
+        cancelled_at = NOW(),
+        cancellation_reason = ?,
+        refund_amount = ?,
+        cancellation_fee = ?,
+        payment_status = ?,
+        updated_at = NOW()
       WHERE id = ?
     `, [
       reason.trim(),
-      parseFloat(refundAmount.toFixed(2)),
-      parseFloat(cancellationFee.toFixed(2)),
+      finalRefund.toFixed(2),
+      cancellationFee.toFixed(2),
+      finalRefund > 0 ? "refunded" : "cancelled",
       bookingId
     ]);
 
-    // Update trek batch slots
-    const participantCount = parseInt(booking.participants || 0);
+    // ===============================
+    // 7️⃣ FETCH PARTICIPANTS (FIXED)
+    // ===============================
+    const [participantRows] = await conn.execute(`
+      SELECT 
+        id,
+        name,
+        age,
+        gender,
+        id_type,
+        id_number,
+        phone,
+        medical_info,
+        is_primary_contact
+      FROM booking_participants
+      WHERE booking_id = ?
+    `, [bookingId]);
+
+    const participants = participantRows || [];
+
+    // ===============================
+    // 8️⃣ RECALCULATE BATCH SLOTS
+    // ===============================
+    const [slotRows] = await conn.execute(`
+      SELECT COALESCE(SUM(participants), 0) AS total_booked
+      FROM bookings
+      WHERE batch_id = ?
+      AND booking_status != 'cancelled'
+    `, [booking.batch_id]);
+
+    const recalculatedBookedSlots = parseInt(slotRows[0].total_booked);
+    const recalculatedAvailableSlots =
+      booking.max_participants - recalculatedBookedSlots;
+
     await conn.execute(`
       UPDATE trek_batches
-      SET available_slots = available_slots + ?,
-          booked_slots = booked_slots - ?
+      SET 
+        booked_slots = ?,
+        available_slots = ?
       WHERE id = ?
-    `, [participantCount, participantCount, booking.batch_id]);
+    `, [
+      recalculatedBookedSlots,
+      recalculatedAvailableSlots < 0 ? 0 : recalculatedAvailableSlots,
+      booking.batch_id
+    ]);
 
     await conn.commit();
-    if (conn) conn.release();
+    conn.release();
 
-    // Prepare booking data for email
+    // ===============================
+    // 📧 SEND EMAIL (ASYNC)
+    // ===============================
     const bookingDataForEmail = {
       ...booking,
-      refund_amount: refundAmount,
+      refund_amount: parseFloat(finalRefund.toFixed(2)),
       refund_percentage: refundPercentage,
-      cancellation_fee: cancellationFee,
+      cancellation_fee: parseFloat(cancellationFee.toFixed(2)),
       cancellation_reason: reason.trim(),
       participants_details: participants
     };
 
-    // Send cancellation email (async, don't wait)
-    emailService.sendCancellationEmail(bookingDataForEmail)
+    emailService
+      .sendCancellationEmail(bookingDataForEmail)
       .then(() => {
-        console.log('Cancellation email sent to:', booking.customer_email);
+        console.log("Cancellation email sent to:", booking.customer_email);
       })
       .catch((err) => {
-        console.error('Failed to send cancellation email:', err);
+        console.error("Failed to send cancellation email:", err);
       });
 
-    return res.json({
+    // ===============================
+    // 9️⃣ RESPONSE
+    // ===============================
+    const responsePayload = {
+      bookingId,
+      bookingReference: booking.booking_reference,
+      refundPercentage,
+      refundBreakdown: {
+        baseRefund: parseFloat(baseRefund.toFixed(2)),
+        gstRefund: parseFloat(gstRefund.toFixed(2))
+      },
+      totalRefund: parseFloat(finalRefund.toFixed(2)),
+      cancellationFee: parseFloat(cancellationFee.toFixed(2)),
+      refundMethod: booking.payment_method || "Original payment method",
+      processingTime: "7-10 business days"
+    };
+
+    const encryptedResponse = encrypt(responsePayload);
+
+    return res.status(200).json({
       success: true,
-      message: 'Booking cancelled successfully',
-      data: {
-        bookingId: parseInt(bookingId),
-        bookingReference: booking.booking_reference,
-        refundAmount: parseFloat(refundAmount.toFixed(2)),
-        refundPercentage: refundPercentage,
-        cancellationFee: parseFloat(cancellationFee.toFixed(2)),
-        processingTime: '7-10 business days',
-        refundMethod: booking.payment_method || 'Original payment method'
-      }
+      message: "Booking cancelled successfully",
+      data: encryptedResponse
     });
 
   } catch (error) {
@@ -664,19 +726,20 @@ async function cancleBooking(req, res) {
       try {
         await conn.rollback();
         conn.release();
-      } catch (rollbackError) {
-        console.error('Rollback error:', rollbackError);
+      } catch (err) {
+        console.error("Rollback failed:", err);
       }
     }
-    console.error('Cancel booking error:', error);
-    return res.status(200).json({
+
+    console.error("Cancel booking error:", error);
+
+    return res.status(500).json({
       success: false,
-      message: 'Failed to cancel booking',
+      message: "Failed to cancel booking",
       error: error.message
     });
   }
 }
 
 
-
-module.exports = { createBookingController, getMyBookingsById, getReceiptById ,cancleBooking};
+module.exports = { createBookingController, getMyBookingsById, getReceiptById , cancelBooking};
