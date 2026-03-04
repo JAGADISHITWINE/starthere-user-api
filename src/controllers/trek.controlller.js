@@ -1,14 +1,50 @@
 const db = require('../config/db');
 const {encrypt} = require('../service/cryptoHelper')
 
+async function ensureTrekRatingsTable(conn) {
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS trek_ratings (
+      id INT NOT NULL AUTO_INCREMENT,
+      booking_id INT NOT NULL,
+      trek_id INT NOT NULL,
+      user_id INT NOT NULL,
+      rating TINYINT NOT NULL,
+      review TEXT,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uniq_booking_rating (booking_id),
+      KEY idx_trek_id (trek_id),
+      KEY idx_user_id (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+}
+
+async function ensureTrekEngagementTable(conn) {
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS trek_engagement (
+      trek_id INT NOT NULL,
+      total_views INT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (trek_id),
+      CONSTRAINT fk_trek_engagement_trek FOREIGN KEY (trek_id) REFERENCES treks(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+}
+
 
 async function getDashboardData(req, res) {
   const conn = await db.getConnection();
 
   try {
+    await ensureTrekRatingsTable(conn);
+    await ensureTrekEngagementTable(conn);
+
     const [rows] = await conn.query(`
       SELECT
         b.id,
+        b.id AS batchId,
+        t.id AS trekId,
         t.name,
         t.location,
         t.difficulty,
@@ -19,6 +55,9 @@ async function getDashboardData(req, res) {
         b.max_participants,
         b.price,
         t.cover_image,
+        COALESCE(rt.avg_rating, 0) AS rating,
+        COALESCE(rt.review_count, 0) AS reviews,
+        COALESCE(te.total_views, 0) AS views,
         (b.available_slots - b.booked_slots) AS availableSlots,
         b.duration,
         CASE 
@@ -38,20 +77,60 @@ async function getDashboardData(req, res) {
           ) hh
         ) AS highlights
       FROM treks t
-      LEFT JOIN trek_batches b
+      INNER JOIN trek_batches b
         ON b.id = (
-          SELECT b2.id
-          FROM trek_batches b2
-          WHERE b2.trek_id = t.id
-            AND b2.status = 'active'
-
-          ORDER BY b2.start_date ASC
+          SELECT tb.id
+          FROM trek_batches tb
+          WHERE tb.trek_id = t.id
+            AND tb.status = 'active'
+            AND tb.start_date > CURDATE()
+            AND (tb.available_slots - tb.booked_slots) > 0
+          ORDER BY tb.start_date ASC, tb.id ASC
           LIMIT 1
         )
-      WHERE b.id IS NOT NULL; 
+      LEFT JOIN (
+        SELECT
+          tb.trek_id,
+          ROUND(AVG(rating), 1) AS avg_rating,
+          COUNT(*) AS review_count
+        FROM trek_ratings tr
+        INNER JOIN bookings b ON b.id = tr.booking_id
+        INNER JOIN trek_batches tb ON tb.id = b.batch_id
+        GROUP BY tb.trek_id
+      ) rt ON rt.trek_id = t.id
+      LEFT JOIN trek_engagement te ON te.trek_id = t.id
+      ORDER BY b.start_date ASC;
     `);
 
-    const encryptedResponse = encrypt(rows);
+    const [[summary]] = await conn.query(`
+      SELECT
+        COALESCE(ROUND(AVG(rating), 1), 0) AS averageRating,
+        COALESCE((
+          SELECT SUM(b.participants)
+          FROM bookings b
+          WHERE YEAR(b.created_at) = YEAR(CURDATE())
+            AND b.booking_status IN ('confirmed', 'completed')
+        ), 0) AS trekkersThisYear,
+        COALESCE((
+          SELECT COUNT(DISTINCT tb.trek_id)
+          FROM trek_batches tb
+          WHERE tb.status = 'active'
+            AND tb.start_date >= CURDATE()
+            AND (tb.available_slots - tb.booked_slots) > 0
+        ), 0) AS activeRoutes
+      FROM trek_ratings
+    `);
+
+    const payload = {
+      summary: {
+        averageRating: Number(summary?.averageRating || 0),
+        trekkersThisYear: Number(summary?.trekkersThisYear || 0),
+        activeRoutes: Number(summary?.activeRoutes || 0)
+      },
+      treks: rows
+    };
+
+    const encryptedResponse = encrypt(payload);
 
     res.status(200).json({
       success: true,
@@ -71,6 +150,9 @@ async function getTrekById(req, res) {
   const conn = await db.getConnection();
 
   try {
+    await ensureTrekRatingsTable(conn);
+    await ensureTrekEngagementTable(conn);
+
     // ✅ First, get the batch to find the trek_id
     const [[batch]] = await conn.query(
       `SELECT 
@@ -109,6 +191,17 @@ async function getTrekById(req, res) {
 
     const trekId = batch.trekId;
 
+    await conn.query(
+      `
+        INSERT INTO trek_engagement (trek_id, total_views)
+        VALUES (?, 1)
+        ON DUPLICATE KEY UPDATE
+          total_views = total_views + 1,
+          updated_at = CURRENT_TIMESTAMP
+      `,
+      [trekId]
+    );
+
     // Get basic trek info
     const [[trek]] = await conn.query("SELECT * FROM treks WHERE id = ?", [
       trekId,
@@ -120,6 +213,26 @@ async function getTrekById(req, res) {
         message: 'Trek not found'
       });
     }
+
+    const [[ratingData]] = await conn.query(
+      `
+        SELECT
+          ROUND(AVG(rating), 1) AS rating,
+          COUNT(*) AS reviewCount
+        FROM trek_ratings
+        WHERE trek_id = ?
+      `,
+      [trekId]
+    );
+
+    trek.rating = Number(ratingData?.rating || 0);
+    trek.reviewCount = Number(ratingData?.reviewCount || 0);
+
+    const [[viewData]] = await conn.query(
+      `SELECT COALESCE(total_views, 0) AS views FROM trek_engagement WHERE trek_id = ? LIMIT 1`,
+      [trekId]
+    );
+    trek.views = Number(viewData?.views || 0);
 
     // Get highlights
     const [highlights] = await conn.query(
@@ -210,6 +323,9 @@ async function getAllTreks(req, res) {
   const conn = await db.getConnection();
 
   try {
+    await ensureTrekRatingsTable(conn);
+    await ensureTrekEngagementTable(conn);
+
     /* =======================
        1️⃣ Fetch all treks (summary)
     ======================= */
@@ -236,10 +352,24 @@ async function getAllTreks(req, res) {
         COUNT(DISTINCT CASE WHEN b.status = 'inactive' THEN b.id END) AS inactive_batches,
         COUNT(DISTINCT CASE WHEN b.status = 'cancelled' THEN b.id END) AS cancelled_batches,
         COUNT(DISTINCT CASE WHEN b.status = 'completed' THEN b.id END) AS completed_batches,
+        COALESCE(rt.avg_rating, 0) AS rating,
+        COALESCE(rt.review_count, 0) AS reviews,
+        COALESCE(te.total_views, 0) AS views,
         t.created_at,
         t.updated_at
       FROM treks t
       LEFT JOIN trek_batches b ON b.trek_id = t.id
+      LEFT JOIN (
+        SELECT
+          tb.trek_id,
+          ROUND(AVG(rating), 1) AS avg_rating,
+          COUNT(*) AS review_count
+        FROM trek_ratings tr
+        INNER JOIN bookings b ON b.id = tr.booking_id
+        INNER JOIN trek_batches tb ON tb.id = b.batch_id
+        GROUP BY tb.trek_id
+      ) rt ON rt.trek_id = t.id
+      LEFT JOIN trek_engagement te ON te.trek_id = t.id
       GROUP BY t.id
       ORDER BY t.created_at DESC
     `);

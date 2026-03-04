@@ -643,7 +643,7 @@ async function createPost(req, res) {
       content,
       category,
       tags,
-      status = 'draft',
+      status = 'pending',
       publishDate,
       existingImageUrl
     } = decrypted
@@ -681,7 +681,7 @@ async function createPost(req, res) {
         userType,
         featured_image,
         status,
-        status === 'published' ? new Date(publishDate) : null
+        status === 'pending' ? new Date(publishDate) : null
       ]
     );
 

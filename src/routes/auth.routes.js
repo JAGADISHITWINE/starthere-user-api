@@ -4,6 +4,7 @@ const trek = require('../controllers/trek.controlller');
 const booking = require('../controllers/booking.controller');
 const upcoming = require('../controllers/upcoming.controller');
 const blogController = require('../controllers/blog.controller');
+const metaController = require('../controllers/meta.controller');
 const upload = require('../middleware/upload'); 
 const { requireAuth } = require('../middleware/auth');
 
@@ -19,14 +20,20 @@ router.post('/validate-reset-token', ctrl.validateResetToken);
 // ========== DASHBOARD ROUTES ==========
 router.get('/dashData', trek.getDashboardData);
 
+// ========== META DROPDOWNS ==========
+router.get('/meta/dropdowns/:type', metaController.getDropdownByType);
+
 // ========== TREK ROUTES ==========
 router.get('/getTrekByUuid/:id', trek.getTrekById);
 router.get('/getAllTreks', trek.getAllTreks);
 
 // ========== BOOKING ROUTES ==========
 router.post('/booking', booking.createBookingController);
+router.post('/coupon/validate', booking.validateCouponController);
+router.get('/coupons/trek/:trekId', booking.getAvailableCouponsController);
 router.get('/getMyBookingsById/:id', booking.getMyBookingsById);
 router.get('/bookings/:userId/:bookingId/receipt', booking.getReceiptById);
+router.post('/bookings/:userId/:bookingId/rating', booking.submitTrekRating);
 router.post('/bookings/:bookingId/cancel', booking.cancelBooking);
 
 // Public routes

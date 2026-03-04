@@ -1,9 +1,51 @@
 const createBooking = require("../models/booking");
 const db = require("../config/db");
 const { encrypt, decrypt } = require("../service/cryptoHelper");
+const couponService = require("../service/coupon.service");
 const PDFDocument = require('pdfkit');
 const path = require('path');
 const emailService = require("../service/emailService"); // Email service
+
+async function ensureTrekRatingsTable(conn) {
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS trek_ratings (
+      id INT NOT NULL AUTO_INCREMENT,
+      booking_id INT NOT NULL,
+      trek_id INT NOT NULL,
+      user_id INT NOT NULL,
+      rating TINYINT NOT NULL,
+      review TEXT,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uniq_booking_rating (booking_id),
+      KEY idx_trek_id (trek_id),
+      KEY idx_user_id (user_id),
+      CONSTRAINT fk_trek_ratings_booking FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE,
+      CONSTRAINT fk_trek_ratings_trek FOREIGN KEY (trek_id) REFERENCES treks(id) ON DELETE CASCADE,
+      CONSTRAINT fk_trek_ratings_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+}
+
+function normalizeCouponCode(code = "") {
+  return String(code || "").trim().toUpperCase();
+}
+
+function isExpectedCreateBookingMessage(message = "") {
+  const text = String(message || "");
+  return [
+    "pending or confirmed booking",
+    "already completed this trek",
+    "insufficient available slots",
+    "invalid coupon code",
+    "coupon is not active yet",
+    "coupon has expired",
+    "coupon minimum requirement",
+    "coupon usage limit reached",
+    "already used this coupon",
+  ].some((phrase) => text.toLowerCase().includes(phrase));
+}
 
 async function createBookingController(req, res) {
   try {
@@ -17,7 +59,9 @@ async function createBookingController(req, res) {
       data: encryptedResponse,
     });
   } catch (error) {
-    console.error("Error creating booking:", error);
+    if (!isExpectedCreateBookingMessage(error?.message)) {
+      console.error("Error creating booking:", error);
+    }
 
     return res.status(200).json({
       success: false,
@@ -31,6 +75,8 @@ async function getMyBookingsById(req, res) {
   const userId = req.params.id;
   
   try {
+    await ensureTrekRatingsTable(conn);
+
     const [bookings] = await conn.execute(
       `
         SELECT 
@@ -38,6 +84,9 @@ async function getMyBookingsById(req, res) {
           t.name as trek_name,
           t.location,
           t.cover_image,
+          tr.rating AS user_rating,
+          tr.review AS user_review,
+          tr.updated_at AS rated_at,
           tb.start_date,
           tb.end_date,
           tb.duration,
@@ -45,6 +94,9 @@ async function getMyBookingsById(req, res) {
         FROM bookings b
         INNER JOIN trek_batches tb ON b.batch_id = tb.id
         INNER JOIN treks t ON tb.trek_id = t.id
+        LEFT JOIN trek_ratings tr
+          ON tr.booking_id = b.id
+         AND tr.user_id = b.user_id
         WHERE b.user_id = ?
         ORDER BY tb.start_date DESC
       `,
@@ -741,5 +793,365 @@ async function cancelBooking(req, res) {
   }
 }
 
+async function submitTrekRating(req, res) {
+  let conn;
 
-module.exports = { createBookingController, getMyBookingsById, getReceiptById , cancelBooking};
+  try {
+    conn = await db.getConnection();
+    await ensureTrekRatingsTable(conn);
+
+    const bookingId = Number(req.params.bookingId);
+    const userId = Number(req.params.userId);
+    const decryptedBody = req.body?.encryptedPayload
+      ? decrypt(req.body.encryptedPayload)
+      : null;
+    const body = (decryptedBody && typeof decryptedBody === "object")
+      ? decryptedBody
+      : (req.body || {});
+    const rating = Number(body.rating);
+    const review = String(body.review || "").trim();
+
+    if (!bookingId || !userId) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid userId and bookingId are required"
+      });
+    }
+
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({
+        success: false,
+        message: "Rating must be an integer between 1 and 5"
+      });
+    }
+
+    const [rows] = await conn.execute(
+      `
+        SELECT
+          b.id,
+          b.user_id,
+          tb.trek_id AS resolved_trek_id,
+          b.booking_status,
+          tb.end_date
+        FROM bookings b
+        INNER JOIN trek_batches tb ON tb.id = b.batch_id
+        WHERE b.id = ? AND b.user_id = ?
+        LIMIT 1
+      `,
+      [bookingId, userId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking not found for this user"
+      });
+    }
+
+    const booking = rows[0];
+    const endDate = new Date(booking.end_date);
+    const today = new Date();
+    endDate.setHours(0, 0, 0, 0);
+    today.setHours(0, 0, 0, 0);
+
+    if (booking.booking_status !== "completed" && endDate > today) {
+      return res.status(400).json({
+        success: false,
+        message: "Rating is allowed only for completed treks"
+      });
+    }
+
+    await conn.execute(
+      `
+        INSERT INTO trek_ratings (booking_id, trek_id, user_id, rating, review)
+        VALUES (?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          rating = VALUES(rating),
+          review = VALUES(review),
+          updated_at = CURRENT_TIMESTAMP
+      `,
+      [bookingId, booking.resolved_trek_id, userId, rating, review || null]
+    );
+
+    const [aggregateRows] = await conn.execute(
+      `
+        SELECT
+          ROUND(AVG(rating), 1) AS average_rating,
+          COUNT(*) AS review_count
+        FROM trek_ratings
+        WHERE trek_id = ?
+      `,
+      [booking.resolved_trek_id]
+    );
+
+    const aggregate = aggregateRows[0] || {};
+    const encryptedResponse = encrypt({
+      bookingId,
+      trekId: booking.resolved_trek_id,
+      rating,
+      review,
+      ratedAt: new Date().toISOString(),
+      averageRating: Number(aggregate.average_rating || 0),
+      reviewCount: Number(aggregate.review_count || 0)
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Rating submitted successfully",
+      data: encryptedResponse
+    });
+  } catch (error) {
+    console.error("Submit rating error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to submit rating",
+      error: error.message
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+}
+
+async function validateCouponController(req, res) {
+  try {
+    await couponService.ensureCouponSchema();
+
+    const payload = decrypt(req.body?.encryptedPayload || "");
+    const trekOrBatchId = Number(payload?.trekId || 0);
+    const userId = Number(payload?.userId || 0);
+    const participants = Number(payload?.participants || 0);
+    const unitPrice = Number(payload?.price || 0);
+    const couponCode = normalizeCouponCode(payload?.couponCode || payload?.coupon?.code || "");
+    const selectedAddOns = Array.isArray(payload?.selectedAddOns) ? payload.selectedAddOns : [];
+
+    if (!trekOrBatchId || !couponCode || !participants || unitPrice < 0) {
+      const encryptedResponse = encrypt({
+        valid: false,
+        message: "trekId, participants, price and couponCode are required",
+      });
+      return res.status(200).json({ success: true, data: encryptedResponse });
+    }
+
+    let couponTrekId = trekOrBatchId;
+    const [[trekById]] = await db.query(
+      "SELECT id FROM treks WHERE id = ? LIMIT 1",
+      [trekOrBatchId]
+    );
+    if (!trekById) {
+      const [[batchRow]] = await db.query(
+        "SELECT trek_id AS trekId FROM trek_batches WHERE id = ? LIMIT 1",
+        [trekOrBatchId]
+      );
+      if (batchRow?.trekId) couponTrekId = Number(batchRow.trekId);
+    }
+
+    const basePrice = unitPrice * participants;
+    const addonsTotal = selectedAddOns
+      .filter((addon) => addon.selected || Number(addon.quantity) > 0)
+      .reduce((sum, addon) => {
+        const quantity = Number(addon.quantity) > 0 ? Number(addon.quantity) : participants;
+        return sum + Number(addon.price || 0) * quantity;
+      }, 0);
+    const subtotalBeforeDiscount = basePrice + addonsTotal;
+
+    const [couponRows] = await db.query(
+      `
+        SELECT
+          id,
+          trek_id,
+          code,
+          discount_type,
+          discount_value,
+          min_booking_amount,
+          max_discount_amount,
+          start_date,
+          end_date,
+          usage_limit,
+          usage_count,
+          is_active
+        FROM trek_coupons
+        WHERE trek_id = ? AND code = ?
+        LIMIT 1
+      `,
+      [couponTrekId, couponCode]
+    );
+
+    const coupon = couponRows[0];
+    if (!coupon || Number(coupon.is_active) !== 1) {
+      const encryptedResponse = encrypt({
+        valid: false,
+        message: "Invalid coupon code for this trek",
+      });
+      return res.status(200).json({ success: true, data: encryptedResponse });
+    }
+
+    const now = new Date();
+    if (coupon.start_date && new Date(coupon.start_date) > now) {
+      const encryptedResponse = encrypt({
+        valid: false,
+        message: "Coupon is not active yet",
+      });
+      return res.status(200).json({ success: true, data: encryptedResponse });
+    }
+    if (coupon.end_date && new Date(coupon.end_date) < now) {
+      const encryptedResponse = encrypt({
+        valid: false,
+        message: "Coupon has expired",
+      });
+      return res.status(200).json({ success: true, data: encryptedResponse });
+    }
+    if (Number(coupon.min_booking_amount || 0) > subtotalBeforeDiscount) {
+      const encryptedResponse = encrypt({
+        valid: false,
+        message: "Booking amount does not meet coupon minimum requirement",
+      });
+      return res.status(200).json({ success: true, data: encryptedResponse });
+    }
+    if (
+      coupon.usage_limit !== null &&
+      Number(coupon.usage_count || 0) >= Number(coupon.usage_limit)
+    ) {
+      const encryptedResponse = encrypt({
+        valid: false,
+        message: "Coupon usage limit reached",
+      });
+      return res.status(200).json({ success: true, data: encryptedResponse });
+    }
+
+    if (userId) {
+      const [usageRows] = await db.query(
+        `
+          SELECT id
+          FROM coupon_usages
+          WHERE coupon_id = ? AND user_id = ?
+          LIMIT 1
+        `,
+        [coupon.id, userId]
+      );
+
+      if (usageRows.length > 0) {
+        const encryptedResponse = encrypt({
+          valid: false,
+          message: "You have already used this coupon",
+        });
+        return res.status(200).json({ success: true, data: encryptedResponse });
+      }
+    }
+
+    let discountAmount = 0;
+    if (coupon.discount_type === "percentage") {
+      discountAmount = subtotalBeforeDiscount * (Number(coupon.discount_value) / 100);
+    } else {
+      discountAmount = Number(coupon.discount_value || 0);
+    }
+    if (coupon.max_discount_amount !== null) {
+      discountAmount = Math.min(discountAmount, Number(coupon.max_discount_amount));
+    }
+    discountAmount = Math.min(discountAmount, subtotalBeforeDiscount);
+
+    const encryptedResponse = encrypt({
+      valid: true,
+      message: "Coupon applied",
+      couponId: coupon.id,
+      code: coupon.code,
+      discountType: coupon.discount_type,
+      discountValue: Number(coupon.discount_value || 0),
+      discountAmount,
+      subtotalBeforeDiscount,
+      subtotalAfterDiscount: subtotalBeforeDiscount - discountAmount,
+    });
+    return res.status(200).json({ success: true, data: encryptedResponse });
+  } catch (error) {
+    console.error("Validate coupon error:", error);
+    return res.status(200).json({
+      success: false,
+      message: "Failed to validate coupon",
+    });
+  }
+}
+
+async function getAvailableCouponsController(req, res) {
+  try {
+    await couponService.ensureCouponSchema();
+
+    const trekOrBatchId = Number(req.params?.trekId || 0);
+    const userId = Number(req.query?.userId || 0);
+    if (!trekOrBatchId) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid trekId is required",
+      });
+    }
+
+    let couponTrekId = trekOrBatchId;
+    const [[trekById]] = await db.query(
+      "SELECT id FROM treks WHERE id = ? LIMIT 1",
+      [trekOrBatchId]
+    );
+    if (!trekById) {
+      const [[batchRow]] = await db.query(
+        "SELECT trek_id AS trekId FROM trek_batches WHERE id = ? LIMIT 1",
+        [trekOrBatchId]
+      );
+      if (batchRow?.trekId) couponTrekId = Number(batchRow.trekId);
+    }
+
+    const [rows] = await db.query(
+      `
+        SELECT
+          c.id,
+          c.code,
+          c.discount_type AS discountType,
+          c.discount_value AS discountValue,
+          c.min_booking_amount AS minBookingAmount,
+          c.max_discount_amount AS maxDiscountAmount,
+          c.end_date AS endDate,
+          c.usage_limit AS usageLimit,
+          c.usage_count AS usageCount
+        FROM trek_coupons c
+        WHERE c.trek_id = ?
+          AND c.is_active = 1
+          AND (c.start_date IS NULL OR c.start_date <= NOW())
+          AND (c.end_date IS NULL OR c.end_date >= NOW())
+          AND (c.usage_limit IS NULL OR c.usage_count < c.usage_limit)
+        ORDER BY c.updated_at DESC
+      `,
+      [couponTrekId]
+    );
+
+    let usedCouponIds = new Set();
+    if (userId && rows.length > 0) {
+      const couponIds = rows.map((r) => r.id);
+      const placeholders = couponIds.map(() => "?").join(",");
+      const [usageRows] = await db.query(
+        `
+          SELECT coupon_id
+          FROM coupon_usages
+          WHERE user_id = ?
+            AND coupon_id IN (${placeholders})
+        `,
+        [userId, ...couponIds]
+      );
+      usedCouponIds = new Set(usageRows.map((r) => Number(r.coupon_id)));
+    }
+
+    const coupons = rows.map((row) => ({
+      ...row,
+      isUsedByUser: usedCouponIds.has(Number(row.id)),
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data: coupons,
+    });
+  } catch (error) {
+    console.error("Get available coupons error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch coupons",
+    });
+  }
+}
+
+
+module.exports = { createBookingController, getMyBookingsById, getReceiptById , cancelBooking, submitTrekRating, validateCouponController, getAvailableCouponsController };

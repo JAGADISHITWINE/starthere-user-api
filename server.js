@@ -50,7 +50,10 @@ app.get('/', (req, res) => {
   res.send('Server is running...');
 });
 
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+const sharedUploadsRoot = process.env.SHARED_UPLOADS_DIR
+  ? path.resolve(process.env.SHARED_UPLOADS_DIR)
+  : path.resolve(__dirname, '../shared-uploads');
+app.use('/uploads', express.static(sharedUploadsRoot));
 
 // Start the server with a safe default port
 const PORT = process.env.PORT || 4002;

@@ -1,10 +1,32 @@
 const db = require("../config/db");
 const emailService = require("../service/emailService"); // Email service
+const couponService = require("../service/coupon.service");
+
+function normalizeCouponCode(code = "") {
+  return String(code || "").trim().toUpperCase();
+}
+
+function isExpectedBookingError(error) {
+  const expectedCodes = new Set([
+    "DUPLICATE_BOOKING",
+    "EXISTING_BOOKING",
+    "INSUFFICIENT_SLOTS",
+    "INVALID_COUPON",
+    "COUPON_NOT_STARTED",
+    "COUPON_EXPIRED",
+    "COUPON_MIN_AMOUNT_NOT_MET",
+    "COUPON_USAGE_LIMIT_REACHED",
+    "COUPON_ALREADY_USED_BY_USER",
+  ]);
+  return expectedCodes.has(String(error?.message || "")) || error?.code === "ER_DUP_ENTRY";
+}
 
 async function createBooking(bookingData) {
   const conn = await db.getConnection();
 
   try {
+    await couponService.ensureCouponSchema();
+
     // Start transaction
     await conn.beginTransaction();
 
@@ -53,10 +75,111 @@ async function createBooking(bookingData) {
 
     // 4. Calculate pricing
     const basePrice = parseFloat(bookingData.price) * bookingData.participants;
-    const addonsTotal = bookingData.selectedAddOns
-      .filter((addon) => addon.selected)
-      .reduce((sum, addon) => sum + addon.price * bookingData.participants, 0);
-    const subtotal = basePrice + addonsTotal;
+    const addonsTotal = (bookingData.selectedAddOns || [])
+      .filter((addon) => addon.selected || Number(addon.quantity) > 0)
+      .reduce((sum, addon) => {
+        const quantity = Number(addon.quantity) > 0
+          ? Number(addon.quantity)
+          : bookingData.participants;
+        return sum + Number(addon.price || 0) * quantity;
+      }, 0);
+    const subtotalBeforeDiscount = basePrice + addonsTotal;
+    let discountAmount = 0;
+    let coupon = null;
+    const couponCode = normalizeCouponCode(bookingData.couponCode || bookingData.coupon?.code);
+    let couponTrekId = Number(bookingData.trekId || 0);
+
+    if (couponCode) {
+      const [[trekById]] = await conn.execute(
+        "SELECT id FROM treks WHERE id = ? LIMIT 1",
+        [couponTrekId]
+      );
+      if (!trekById) {
+        const [[batchRow]] = await conn.execute(
+          "SELECT trek_id AS trekId FROM trek_batches WHERE id = ? LIMIT 1",
+          [bookingData.batchId]
+        );
+        if (batchRow?.trekId) {
+          couponTrekId = Number(batchRow.trekId);
+        }
+      }
+    }
+
+    if (couponCode) {
+      const [couponRows] = await conn.execute(
+        `
+          SELECT
+            id,
+            trek_id,
+            code,
+            discount_type,
+            discount_value,
+            min_booking_amount,
+            max_discount_amount,
+            start_date,
+            end_date,
+            usage_limit,
+            usage_count,
+            is_active
+          FROM trek_coupons
+          WHERE trek_id = ? AND code = ?
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [couponTrekId, couponCode]
+      );
+
+      coupon = couponRows[0];
+      if (!coupon || Number(coupon.is_active) !== 1) {
+        throw new Error("INVALID_COUPON");
+      }
+
+      const now = new Date();
+      if (coupon.start_date && new Date(coupon.start_date) > now) {
+        throw new Error("COUPON_NOT_STARTED");
+      }
+      if (coupon.end_date && new Date(coupon.end_date) < now) {
+        throw new Error("COUPON_EXPIRED");
+      }
+
+      if (Number(coupon.min_booking_amount || 0) > subtotalBeforeDiscount) {
+        throw new Error("COUPON_MIN_AMOUNT_NOT_MET");
+      }
+
+      if (
+        coupon.usage_limit !== null &&
+        Number(coupon.usage_count || 0) >= Number(coupon.usage_limit)
+      ) {
+        throw new Error("COUPON_USAGE_LIMIT_REACHED");
+      }
+
+      const [usageRows] = await conn.execute(
+        `
+          SELECT id
+          FROM coupon_usages
+          WHERE coupon_id = ? AND user_id = ?
+          LIMIT 1
+        `,
+        [coupon.id, bookingData.userId]
+      );
+
+      if (usageRows.length > 0) {
+        throw new Error("COUPON_ALREADY_USED_BY_USER");
+      }
+
+      if (coupon.discount_type === "percentage") {
+        discountAmount = subtotalBeforeDiscount * (Number(coupon.discount_value) / 100);
+      } else {
+        discountAmount = Number(coupon.discount_value || 0);
+      }
+
+      if (coupon.max_discount_amount !== null) {
+        discountAmount = Math.min(discountAmount, Number(coupon.max_discount_amount));
+      }
+      discountAmount = Math.min(discountAmount, subtotalBeforeDiscount);
+    }
+
+    const subtotal = subtotalBeforeDiscount - discountAmount;
     const taxAmount = subtotal * 0.05; // 5% tax
     const totalAmount = subtotal + taxAmount;
 
@@ -129,7 +252,7 @@ async function createBooking(bookingData) {
       addonsTotal,
       subtotal,
       taxAmount,
-      0, // discount_amount
+      discountAmount,
       totalAmount,
       "pending",
       0, // amount_paid
@@ -194,23 +317,47 @@ async function createBooking(bookingData) {
       `;
 
       for (const addon of bookingData.selectedAddOns) {
-        if (addon.selected) {
-          const quantity = bookingData.participants;
-          const totalPrice = addon.price * quantity;
+        const quantity = Number(addon.quantity) > 0
+          ? Number(addon.quantity)
+          : (addon.selected ? bookingData.participants : 0);
+
+        if (quantity > 0) {
+          const unitPrice = Number(addon.price || 0);
+          const totalPrice = unitPrice * quantity;
 
           await conn.execute(addonQuery, [
             bookingId,
             addon.id,
             addon.name,
             quantity,
-            addon.price,
+            unitPrice,
             totalPrice,
           ]);
         }
       }
     }
 
-    // 8. Update trek batch available slots
+    // 8. Mark coupon usage (if applied)
+    if (coupon) {
+      await conn.execute(
+        `
+          INSERT INTO coupon_usages (coupon_id, user_id, booking_id)
+          VALUES (?, ?, ?)
+        `,
+        [coupon.id, bookingData.userId, bookingId]
+      );
+
+      await conn.execute(
+        `
+          UPDATE trek_coupons
+          SET usage_count = usage_count + 1
+          WHERE id = ?
+        `,
+        [coupon.id]
+      );
+    }
+
+    // 9. Update trek batch available slots
     const updateSlotsQuery = `
       UPDATE trek_batches 
       SET 
@@ -231,10 +378,10 @@ async function createBooking(bookingData) {
       throw new Error("INSUFFICIENT_SLOTS");
     }
 
-    // 9. Commit transaction
+    // 10. Commit transaction
     await conn.commit();
 
-    // 10. Fetch complete booking details with participants
+    // 11. Fetch complete booking details with participants
     const [bookingDetails] = await conn.execute(
       `
       SELECT 
@@ -275,7 +422,7 @@ async function createBooking(bookingData) {
 
     booking.participants_details = participants;
 
-    // 11. Send confirmation email (async, don't wait)
+    // 12. Send confirmation email (async, don't wait)
     emailService
       .sendBookingConfirmation(booking)
       .then(() => {
@@ -287,7 +434,7 @@ async function createBooking(bookingData) {
         console.error("Failed to send confirmation email:", err.message || err);
       });
 
-    // 12. Notify admin via admin socket server about new booking
+    // 13. Notify admin via admin socket server about new booking
     try {
       const ioClient = require("socket.io-client");
       const adminSocketUrl = process.env.ADMIN_SOCKET_URL || "http://localhost:4001";
@@ -334,7 +481,9 @@ async function createBooking(bookingData) {
   } catch (error) {
     // Rollback transaction on error
     await conn.rollback();
-    console.error("Booking creation error:", error);
+    if (!isExpectedBookingError(error)) {
+      console.error("Booking creation error:", error);
+    }
 
     // Custom error messages
     if (error.message === "DUPLICATE_BOOKING") {
@@ -349,6 +498,27 @@ async function createBooking(bookingData) {
     }
     if (error.message === "INSUFFICIENT_SLOTS") {
       throw new Error("Insufficient available slots or batch not found");
+    }
+    if (error.message === "INVALID_COUPON") {
+      throw new Error("Invalid coupon code for this trek");
+    }
+    if (error.message === "COUPON_NOT_STARTED") {
+      throw new Error("Coupon is not active yet");
+    }
+    if (error.message === "COUPON_EXPIRED") {
+      throw new Error("Coupon has expired");
+    }
+    if (error.message === "COUPON_MIN_AMOUNT_NOT_MET") {
+      throw new Error("Booking amount does not meet coupon minimum requirement");
+    }
+    if (error.message === "COUPON_USAGE_LIMIT_REACHED") {
+      throw new Error("Coupon usage limit reached");
+    }
+    if (error.message === "COUPON_ALREADY_USED_BY_USER") {
+      throw new Error("You have already used this coupon");
+    }
+    if (error.code === "ER_DUP_ENTRY") {
+      throw new Error("You have already used this coupon");
     }
 
     throw error;
