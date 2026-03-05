@@ -1,6 +1,34 @@
 // controllers/trekController.js
 const db = require("../config/db");
 const { encrypt } = require("../service/cryptoHelper");
+const { encodePublicRef, decodePublicRef } = require("../service/publicRef");
+
+function unwrapClientRefToken(rawValue) {
+  const input = String(rawValue || "").trim();
+  if (!input) return null;
+
+  try {
+    const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+    const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
+    const decoded = Buffer.from(`${normalized}${padding}`, "base64").toString("utf8");
+    if (!decoded.startsWith("trk:")) return null;
+    return decoded.slice(4).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveTrekId(rawId) {
+  const text = String(rawId || "").trim();
+  if (!text) return null;
+
+  const unwrapped = unwrapClientRefToken(text) || text;
+  const decoded = decodePublicRef(unwrapped, "trek");
+  const allowLegacyNumeric = String(process.env.ALLOW_LEGACY_NUMERIC_IDS || "").toLowerCase() === "true";
+  const candidate = decoded || (allowLegacyNumeric ? unwrapped : "");
+  const numericId = Number(candidate);
+  return Number.isInteger(numericId) && numericId > 0 ? numericId : null;
+}
 
 /**
  * Get all upcoming treks with filters
@@ -128,7 +156,10 @@ async function getAllUpcoming(req, res) {
       `;
 
       const [batches] = await conn.execute(batchQuery, [trek.id]);
-      trek.batches = batches;
+      trek.batches = batches.map((batch) => ({
+        ...batch,
+        public_ref: encodePublicRef("batch", batch.id),
+      }));
     }
 
     const response = {
@@ -164,7 +195,7 @@ async function getTrekById(req, res) {
 
   try {
     conn = await db.getConnection();
-    const { id } = req.params;
+    const id = resolveTrekId(req.params.id);
 
     // Validate ID
     if (!id || isNaN(id) || id <= 0) {
@@ -231,11 +262,13 @@ async function getTrekById(req, res) {
         batch.inclusions = JSON.parse(batch.inclusions || "[]");
         batch.exclusions = JSON.parse(batch.exclusions || "[]");
         batch.itinerary_days = JSON.parse(batch.itinerary_days || "[]");
+        batch.public_ref = encodePublicRef("batch", batch.id);
       } catch (parseError) {
         console.error("Batch JSON parse error:", parseError);
         batch.inclusions = [];
         batch.exclusions = [];
         batch.itinerary_days = [];
+        batch.public_ref = encodePublicRef("batch", batch.id);
       }
     }
 
@@ -333,7 +366,10 @@ async function getTrekBymonth(req, res) {
     const response = {
       success: true,
       count: treks.length,
-      treks: treks
+      treks: treks.map((trek) => ({
+        ...trek,
+        batch_public_ref: encodePublicRef("batch", trek.batch_id),
+      }))
     };
 
     const encryptedResponse = encrypt(response);

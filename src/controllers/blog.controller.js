@@ -1,6 +1,34 @@
 const db = require("../config/db");
 
 const { decrypt, encrypt } = require('../service/cryptoHelper'); // adjust path
+const { encodePublicRef, decodePublicRef } = require('../service/publicRef');
+
+function unwrapClientRefToken(rawValue) {
+  const input = String(rawValue || '').trim();
+  if (!input) return null;
+
+  try {
+    const normalized = input.replace(/-/g, '+').replace(/_/g, '/');
+    const padding = '='.repeat((4 - (normalized.length % 4)) % 4);
+    const decoded = Buffer.from(`${normalized}${padding}`, 'base64').toString('utf8');
+    if (!decoded.startsWith('trk:')) return null;
+    return decoded.slice(4).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolvePostId(rawId) {
+  const text = String(rawId || '').trim();
+  if (!text) return null;
+
+  const unwrapped = unwrapClientRefToken(text) || text;
+  const decoded = decodePublicRef(unwrapped, 'post');
+  const allowLegacyNumeric = String(process.env.ALLOW_LEGACY_NUMERIC_IDS || '').toLowerCase() === 'true';
+  const candidate = decoded || (allowLegacyNumeric ? unwrapped : '');
+  const numericId = Number(candidate);
+  return Number.isInteger(numericId) && numericId > 0 ? numericId : null;
+}
 
 function encryptedResponse(res, statusCode, payload) {
   const encrypted = encrypt(payload.data);
@@ -97,6 +125,8 @@ async function getAllPosts(req, res) {
           post.author_name || 'User'
         )}&size=100`;
       }
+
+      post.public_ref = encodePublicRef('post', post.id);
     }
 
     return encryptedResponse(res, 200, {
@@ -120,7 +150,13 @@ async function getAllPosts(req, res) {
 // Get single post by ID with full details
 async function getPostById(req, res) {
   try {
-    const { id } = req.params;
+    const postId = resolvePostId(req.params.id);
+    if (!postId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid post reference'
+      });
+    }
 
     const [posts] = await db.execute(
       `SELECT 
@@ -147,7 +183,7 @@ async function getPostById(req, res) {
       LEFT JOIN admins a ON p.author_id = a.id AND p.author_type = 'admin'
       LEFT JOIN users u ON p.author_id = u.id AND p.author_type = 'user'
       WHERE p.id = ?`,
-      [parseInt(id)]
+      [postId]
     );
 
     if (posts.length === 0) {
@@ -170,6 +206,7 @@ async function getPostById(req, res) {
 
     const formattedPost = {
       id: post.id,
+      public_ref: encodePublicRef('post', post.id),
       title: post.title,
       slug: post.slug,
       excerpt: post.excerpt,
@@ -213,7 +250,7 @@ async function getRelatedPosts(req, res) {
 
     const limitNum = Math.max(1, Math.min(10, parseInt(limit) || 3));
     const categoryIdNum = parseInt(category_id);
-    const excludeIdNum = parseInt(exclude_id);
+    const excludeIdNum = resolvePostId(exclude_id) || parseInt(exclude_id);
 
     const query = `
       SELECT 
@@ -244,6 +281,7 @@ async function getRelatedPosts(req, res) {
 
     const formattedPosts = posts.map(post => ({
       id: post.id,
+      public_ref: encodePublicRef('post', post.id),
       title: post.title,
       slug: post.slug,
       image: post.featured_image,
@@ -266,8 +304,13 @@ async function getRelatedPosts(req, res) {
 // Get comments for a post
 async function getComments(req, res) {
   try {
-    const { id } = req.params;
-    const postId = parseInt(id);
+    const postId = resolvePostId(req.params.id);
+    if (!postId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid post reference'
+      });
+    }
 
     // Get main comments
     const [comments] = await db.execute(
@@ -335,12 +378,16 @@ async function getComments(req, res) {
 // Like a post
 async function likePost(req, res) {
   try {
-    const { id } = req.params;
     const userId = req.user?.id || null;
     const userType = req.user?.type || null;
     const ipAddress = req.ip;
-
-    const postId = parseInt(id);
+    const postId = resolvePostId(req.params.id);
+    if (!postId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid post reference'
+      });
+    }
 
     // Check if already liked
     let checkQuery = 'SELECT * FROM post_likes WHERE post_id = ?';
@@ -599,8 +646,13 @@ async function deleteComment(req, res) {
 // Increment view count
 async function incrementView(req, res) {
   try {
-    const { id } = req.params;
-    const postId = parseInt(id);
+    const postId = resolvePostId(req.params.id);
+    if (!postId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid post reference'
+      });
+    }
 
     await db.execute(
       'UPDATE posts SET views = views + 1 WHERE id = ?',

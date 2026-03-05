@@ -1,5 +1,33 @@
 const db = require('../config/db');
 const {encrypt} = require('../service/cryptoHelper')
+const { encodePublicRef, decodePublicRef } = require('../service/publicRef');
+
+function unwrapClientRefToken(rawValue) {
+  const input = String(rawValue || '').trim();
+  if (!input) return null;
+
+  try {
+    const normalized = input.replace(/-/g, '+').replace(/_/g, '/');
+    const padding = '='.repeat((4 - (normalized.length % 4)) % 4);
+    const decoded = Buffer.from(`${normalized}${padding}`, 'base64').toString('utf8');
+    if (!decoded.startsWith('trk:')) return null;
+    return decoded.slice(4).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveBatchId(rawId) {
+  const text = String(rawId || '').trim();
+  if (!text) return null;
+
+  const unwrapped = unwrapClientRefToken(text) || text;
+  const decoded = decodePublicRef(unwrapped, 'batch');
+  const allowLegacyNumeric = String(process.env.ALLOW_LEGACY_NUMERIC_IDS || '').toLowerCase() === 'true';
+  const candidate = decoded || (allowLegacyNumeric ? unwrapped : '');
+  const numericId = Number(candidate);
+  return Number.isInteger(numericId) && numericId > 0 ? numericId : null;
+}
 
 async function ensureTrekRatingsTable(conn) {
   await conn.execute(`
@@ -127,7 +155,10 @@ async function getDashboardData(req, res) {
         trekkersThisYear: Number(summary?.trekkersThisYear || 0),
         activeRoutes: Number(summary?.activeRoutes || 0)
       },
-      treks: rows
+      treks: rows.map((row) => ({
+        ...row,
+        public_ref: encodePublicRef('batch', row.batchId || row.id),
+      }))
     };
 
     const encryptedResponse = encrypt(payload);
@@ -146,12 +177,19 @@ async function getDashboardData(req, res) {
 }
 
 async function getTrekById(req, res) {
-  const batchId = req.params.id;  // ✅ Accepting batch_id
+  const batchId = resolveBatchId(req.params.id);
   const conn = await db.getConnection();
 
   try {
     await ensureTrekRatingsTable(conn);
     await ensureTrekEngagementTable(conn);
+
+    if (!batchId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid trek reference'
+      });
+    }
 
     // ✅ First, get the batch to find the trek_id
     const [[batch]] = await conn.query(
@@ -297,6 +335,7 @@ async function getTrekById(req, res) {
     batch.itineraryDays = days;
 
     // ✅ Attach only this batch to trek
+    batch.public_ref = encodePublicRef('batch', batch.batchId);
     trek.batch = batch;
 
     const encryptedResponse = encrypt(trek);
@@ -420,7 +459,12 @@ async function getAllTreks(req, res) {
        4️⃣ Attach everything
     ======================= */
     for (const trek of treks) {
-      trek.batches = batchMap[trek.id] || [];
+      const trekBatches = (batchMap[trek.id] || []).map((batch) => ({
+        ...batch,
+        public_ref: encodePublicRef('batch', batch.id),
+      }));
+      trek.batches = trekBatches;
+      trek.detail_public_ref = trekBatches[0]?.public_ref || null;
       trek.highlight_count = highlightMap[trek.id] || 0;
 
       trek.earliest_start_date = trek.earliest_start_date

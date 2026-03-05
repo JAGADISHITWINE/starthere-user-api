@@ -1,6 +1,7 @@
 const createBooking = require("../models/booking");
 const db = require("../config/db");
 const { encrypt, decrypt } = require("../service/cryptoHelper");
+const { encodePublicRef } = require("../service/publicRef");
 const couponService = require("../service/coupon.service");
 const PDFDocument = require('pdfkit');
 const path = require('path');
@@ -137,6 +138,7 @@ async function getMyBookingsById(req, res) {
 
       booking.addons = addons;
       booking.participants_details = participants;
+      booking.public_ref = encodePublicRef("batch", booking.batch_id);
       booking.can_cancel =
         booking.days_until_trek >= 7 &&
         (booking.booking_status === "pending" ||
